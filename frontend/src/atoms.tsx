@@ -18,7 +18,7 @@ export const Icon = ({ name, size = 16, stroke = 1.6, style }: {
     dashboard: <><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></>,
     led: <><path d="M12 3v3M12 18v3M5 12H2M22 12h-3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="4"/></>,
     motion: <><path d="M3 12h3l3-7 4 14 3-7h5"/></>,
-    mesh: <><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 7v10M10.5 6.5l-5 11M13.5 6.5l5 11"/></>,
+    person: <><circle cx="12" cy="7" r="4"/><path d="M5 21v-1a7 7 0 0 1 14 0v1"/></>,
     chip: <><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 1v3M12 1v3M15 1v3M9 20v3M12 20v3M15 20v3M1 9h3M1 12h3M1 15h3M20 9h3M20 12h3M20 15h3"/></>,
     wifi: <><path d="M2 8.5C5 6 8.5 4.5 12 4.5s7 1.5 10 4M5 12c2-1.7 4.5-2.5 7-2.5s5 .8 7 2.5M8.5 15.5c1-.8 2.2-1.2 3.5-1.2s2.5.4 3.5 1.2"/><circle cx="12" cy="19" r="1" fill="currentColor"/></>,
     settings: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8a2 2 0 1 1-2.8 2.8a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3a2 2 0 1 1-2.8-2.8a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8a2 2 0 1 1 2.8-2.8a1.7 1.7 0 0 0 1.8.3a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3a2 2 0 1 1 2.8 2.8a1.7 1.7 0 0 0-.3 1.8a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4z"/></>,
@@ -30,6 +30,9 @@ export const Icon = ({ name, size = 16, stroke = 1.6, style }: {
     warn: <><path d="M12 3 2 21h20L12 3zM12 10v5M12 18h.01"/></>,
     refresh: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></>,
     upload: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></>,
+    download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></>,
+    eye: <><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></>,
+    eyeOff: <><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></>,
     bolt: <><path d="M13 2L3 14h7l-1 8 10-12h-7z"/></>,
     cpu: <><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></>,
     radar: <><circle cx="12" cy="12" r="9"/><path d="M12 12L19 7"/><path d="M12 12a4 4 0 1 1-4 4"/></>,
@@ -149,36 +152,6 @@ export function DualHandleRange({ minVal, maxVal, onChange, min = 0, max = 500 }
   );
 }
 
-/* SVG topology diagrams used by Mesh screen. */
-export function TopologyDiagram({ kind, size = 96 }: { kind: 'straight'|'l_shape'|'u_shape'|'custom'; size?: number }) {
-  const stroke = 'var(--text-2)';
-  const acc = 'var(--acc-orange)';
-  if (kind === 'straight') return (
-    <svg viewBox="0 0 100 60" width="100%" style={`height: ${size*0.6}px;`}>
-      <line x1="10" y1="30" x2="90" y2="30" stroke={stroke} stroke-width="2"/>
-      {[10, 50, 90].map((x, i) => <circle key={i} cx={x} cy="30" r="4" fill={acc}/>)}
-    </svg>
-  );
-  if (kind === 'l_shape') return (
-    <svg viewBox="0 0 100 100" width="100%" style={`height: ${size}px;`}>
-      <polyline points="20,20 20,80 80,80" stroke={stroke} stroke-width="2" fill="none"/>
-      {[[20,20],[20,50],[20,80],[50,80],[80,80]].map(([x,y], i) => <circle key={i} cx={x} cy={y} r="4" fill={acc}/>)}
-    </svg>
-  );
-  if (kind === 'u_shape') return (
-    <svg viewBox="0 0 100 100" width="100%" style={`height: ${size}px;`}>
-      <polyline points="15,20 15,80 85,80 85,20" stroke={stroke} stroke-width="2" fill="none"/>
-      {[[15,20],[15,50],[15,80],[50,80],[85,80],[85,50],[85,20]].map(([x,y], i) => <circle key={i} cx={x} cy={y} r="4" fill={acc}/>)}
-    </svg>
-  );
-  return (
-    <svg viewBox="0 0 100 100" width="100%" style={`height: ${size}px;`}>
-      <path d="M 15 30 Q 40 10 55 40 T 85 70" stroke={stroke} stroke-width="2" fill="none" stroke-dasharray="3 3"/>
-      {[[15,30],[40,22],[55,40],[70,52],[85,70]].map(([x,y], i) => <circle key={i} cx={x} cy={y} r="4" fill={acc}/>)}
-    </svg>
-  );
-}
-
 /* Two-line chart for Motion screen — raw vs smoothed distance. */
 export function LineChart({ raw, smooth, width = 600, height = 180 }: {
   raw: number[]; smooth: number[]; width?: number; height?: number;
@@ -243,7 +216,11 @@ export function LogoMark({ size = 36, distance = 0 }: { size?: number; distance?
             <stop offset="100%" stop-color="var(--acc-pink)"/>
           </radialGradient>
         </defs>
-        <rect x="1" y="1" width="46" height="46" rx="12" fill="#0a0c0f" stroke="url(#lm-grad)" stroke-width="1" opacity="0.55"/>
+        {/* Theme-aware fills: var(--bg-0) follows the page background
+         * (near-black on dark theme, near-white on light) so the logo
+         * tile + inner triangle cutout always blend with the page. The
+         * old hardcoded #0a0c0f leaked a black square onto light theme. */}
+        <rect x="1" y="1" width="46" height="46" rx="12" stroke="url(#lm-grad)" stroke-width="1" opacity="0.55" style="fill: var(--bg-0);"/>
         <g style="transform-origin: 24px 32px;">
           {[0, 1, 2].map(i => (
             <circle cx="24" cy="32" r="6" fill="none" stroke="url(#lm-grad)" stroke-width="1.2" opacity="0.7"
@@ -251,7 +228,7 @@ export function LogoMark({ size = 36, distance = 0 }: { size?: number; distance?
           ))}
         </g>
         <path d="M 24 11 L 13 32 L 35 32 Z" fill="url(#lm-grad)" opacity="0.95"/>
-        <path d="M 24 18 L 18 30 L 30 30 Z" fill="#0a0c0f"/>
+        <path d="M 24 18 L 18 30 L 30 30 Z" style="fill: var(--bg-0);"/>
         <circle cx="24" cy="32" r="2.6" fill="url(#lm-core)"/>
         <circle cx="24" cy="32" r="1.1" fill="white" opacity="0.9"/>
         {[[6,6],[42,6],[6,42],[42,42]].map(([x,y]) => (

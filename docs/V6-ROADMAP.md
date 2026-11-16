@@ -1,12 +1,16 @@
 # AmbiSense v6 — PR-by-PR roadmap
 
-> **Status (2026-05-05): v6.0.0 RELEASED.** All five planned PRs landed
-> plus a post-PR-5 polish pass (Kalman motion, asymmetric pairing,
-> debounced UI saves, mobile CSS, board MCU-mismatch boot guard). See
-> the [v6.0.0 release page](https://github.com/Techposts/AmbiSense/releases/tag/v6.0.0)
-> for the user-facing summary.
+> **Status (2026-05-07): v6.0.0 released; v6.x architectural pivot in
+> progress on `v6-idf-rewrite`.** v6.x drops the dual-device ESP-NOW
+> master/slave architecture in favour of a single-sensor LD2450 design,
+> in preparation for a custom PCB. The historical PR record below
+> describes how v6.0.0 was built; the section "v6.x roadmap" at the
+> bottom captures what changed after release and what's next.
 >
-> v6.x roadmap (post-6.0.0 work) is at the bottom of this file.
+> See [`V6-ARCHITECTURE.md`](V6-ARCHITECTURE.md) for the locked v6.x
+> architectural decisions, and the
+> [v6.0.0 release page](https://github.com/Techposts/AmbiSense/releases/tag/v6.0.0)
+> for the historical user-facing summary.
 
 Five PRs. Each is independently flashable and validated on real C3
 hardware before the next starts. Releases tagged `v6.0.0-alpha.N` from
@@ -198,15 +202,55 @@ CI auto-attaches per-board firmware artifacts to tag pushes.
 
 ## v6.x roadmap (post-6.0.0)
 
-These are tracked but did NOT ship in 6.0.0. See the v6.0.0 release
-notes for the user-facing version of the same list.
+### v6.x architectural pivot (in progress, 2026-05-07)
+
+Dropped the dual-device ESP-NOW master/slave architecture and locked
+the firmware to one ESP32-C3 + one LD2450 per install. Removed the
+`mesh` and `topology` components, the LD2410-family radar drivers, the
+Mesh screen in the web UI, all `/api/mesh*` and `/api/topology*`
+endpoints, and the `mesh` and `topo` NVS namespaces. See
+[`V6-ARCHITECTURE.md`](V6-ARCHITECTURE.md) for the full justification
+and what was kept.
+
+### Released alphas
+
+| Tag | Highlights |
+|---|---|
+| `v6.1.0-alpha.1`–`alpha.3` | Wi-Fi UX overhaul (modal flow, AP grace period, copy fallback), mobile-friendly UI, AP-teardown bug hotfix. |
+| `v6.2.0-alpha.1` | Phase 2.A — restored LD2410(C) drivers as opt-in; new `presence` component reading `radar_peek()` at 10 Hz; Presence tab in UI; `/api/presence` endpoint. |
+| `v6.2.0-alpha.2` | Phase 2.B — smartghar wire contract: `/api/v1/info`, `/api/v1/devices`, `/api/v1/devices/{id}` PUT, `/api/v1/hub/identify`, `/api/v1/hub/reboot`. mDNS `_smartghar._tcp` advertisement with TXT records. |
+| `v6.2.0-alpha.3` | Hotfix — mDNS instance name (NULL inheritance), `hub_name` field in `/api/v1/info`. |
+| **`v6.2.0-alpha.4`** | **Schema 1.1** — `info.topology` (`"standalone"`) + `info.stream` block; new `/api/v1/stream` WS push channel (3 s snapshots, separate fd pool from `/api/live`). Pairs with smartghar-homeassistant **v0.7.1** — fixes "shows as two HA devices" bug + brings real-time presence updates. ADR: D-009, D-010. |
+
+### Queued (post-alpha.4, pending user go-ahead)
+
+- **Entity expansion (alpha.5 + integration v0.7.2)** — three high-leverage HA additions:
+  - `Stationary` binary_sensor (separate from occupancy — automate on "stationary 30 min → reading/sleeping")
+  - `Approaching` binary_sensor (Kalman direction = approaching AND occupied — the radar-vs-PIR differentiator: "light only when walking *toward* door")
+  - LED as a `Light` entity (proper HA Light card alongside the Number slider — integrates with HA scenes, Adaptive Lighting)
+  - Cost: ~1 hour. Firmware adds `direction` to `/api/v1/devices` state; integration adds two binary_sensor classes + new `light.py` platform.
+- **Per-target LD2450 telemetry** — explicitly rejected for now. Zone-based detection should be a firmware feature with per-zone binary_sensors, not raw coordinate dumping (9 entities × 1500 ms graph noise).
+
+### PCB rev (next)
+- **Custom PCB based on ESP32-C3 + LD2450** — discrete AP2112K-3.3 or
+  MIC5219 LDO feeding both the C3's 3.3 V rail and the LD2450 (avoids
+  the SuperMini onboard LDO marginal under continuous radar load).
+  Star-grounded LED-strip return to PSU; unpopulated I²C header for
+  future env sensor or optional second LD2450.
+- **Bench validation of single-sensor coverage** on real L-shape and
+  U-shape benches at the inside-corner mounting position. Document
+  range degradation at far-end of long arms.
+
+### LED engine work
+- **2-D zone mapping from LD2450 (x, y)** — currently the LED engine
+  uses distance-only mapping. With single-sensor architecture locked,
+  add a runtime "strip shape" config (straight / L / U) so target
+  (x, y) projects to the correct LED segment. This replaces what the
+  v6.0 topology component did across multiple devices.
+- **Calibration UI** — drag-define the LED strip's 2-D path in the
+  sensor's coordinate frame; persist to NVS.
 
 ### Hardening
-- **Encrypted ESP-NOW** — derive a PMK from a user mesh password,
-  enable per-peer LMK, store in NVS namespace `mesh.pmk`. Targets are
-  defined in `mesh.h` (the `mesh_event_cb_t` plumbing is already in
-  place); the actual `esp_now_set_pmk` call and UI password field are
-  v6.1 work.
 - **Signed OTA** — `esp_secure_boot` + signed `.bin` with rollback. The
   bootloader rollback path is already armed; signing keys + UI
   workflow are pending.
@@ -214,22 +258,14 @@ notes for the user-facing version of the same list.
   reboot. Move to NVS with explicit revocation list.
 
 ### UX / scale
-- **Auto-topology learning** — "walk through your stairs" mode where
-  the device records distance histograms over a 60 s window and
-  proposes segment boundaries automatically.
-- **Dual-core pinning (S3 / classic)** — `xTaskCreatePinnedToCore` for
-  Wi-Fi/HTTP on core 0 and radar+LED+motion on core 1. Lifts the
-  HTTP-saturates-render limitation we currently work around with the
-  client-side debounce.
 - **LED count beyond 300** — verified; lift the documented soft cap to
   the theoretical 1500-pixel limit per device.
-- **Realistic `sim` radar** — replay captured LD2410 frame logs
-  instead of emitting a slow sine.
-
-### Misc
-- **OTA preserves paired peers** — currently a factory reset wipes the
-  topology blob too; needs a "keep mesh config" toggle.
-- **`esp32s3-zero` profile validation** — pinmap is correct in the
-  profile; needs a hardware bring-up + photo for HARDWARE.md once an
-  S3-Zero arrives on bench.
+- **Realistic `sim` radar** — replay captured LD2450 frame logs.
 - **Factory reset preserves Wi-Fi** option.
+
+### Removed from this list (no longer relevant under single-sensor)
+- ~~Encrypted ESP-NOW~~
+- ~~Auto-topology learning across multi-device installs~~
+- ~~Dual-core pinning to handle peer mesh load~~ (single-sensor C3 has
+  enough headroom)
+- ~~OTA preserves paired peers~~

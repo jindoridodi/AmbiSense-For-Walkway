@@ -3,34 +3,49 @@
   <img src="https://raw.githubusercontent.com/Techposts/AmbiSense/refs/heads/main/Assets/AmbiSense.webp" width="300" alt="AmbiSense Logo">
 </p>
 
-> ### 🚀 v6.0.0 shipped — full ESP-IDF + FreeRTOS rewrite
+> ### 🚀 v6.x — single-sensor PCB rev (in development on `v6-idf-rewrite`)
 >
-> v6 is a ground-up rewrite from Arduino onto **ESP-IDF + FreeRTOS**: independent
-> FreeRTOS tasks for radar read, motion smoothing, LED rendering, web serving,
-> and ESP-NOW peer-mesh — no more cooperative `loop()` starving the LED
-> render under HTTP load. v6 ships with **LD2450 multi-target tracking**, a
-> **modular radar driver layer** (LD2410 / LD2412 / LD2420 / LD2450 / sim —
-> swap via web UI without reflashing), a **board picker with editable pin map**
-> (ESP32-C3 / ESP32 / S3 / C6), a **peer mesh** for U/L/asymmetric stairs
-> (every device runs identical code; lowest-MAC wins coordinator),
-> **asymmetric pairing** (click Pair on either device → both join), a
-> **Kalman-based motion filter** (3 user knobs instead of v5's 5 cryptic
-> gains), **OTA with rollback**, **captive portal**, **PBKDF2-SHA256 auth**,
-> and a **fully responsive Preact web UI** (sidebar on desktop, bottom-tab
-> nav on mobile).
+> v6.0.0 shipped a dual-device ESP-NOW master/slave architecture. Bench
+> testing on real U-shape and L-shape installs surfaced two structural
+> problems with that approach: (1) ESP-NOW round-trip jitter (5–100 ms
+> with retries) added visible LED lag, and (2) the LD2450's `(x, y, speed)`
+> target stream from a single sensor at the inside corner already covers
+> both arms inside its 60° cone — making the second sensor redundant.
+> v6.x **drops the dual-device architecture entirely** and locks the
+> firmware to **one ESP32-C3 + one LD2450 per install**, in preparation
+> for a custom PCB.
 >
-> **Recommended hardware: ESP32-S3 (DevKitC-1 or S3-Zero).** ESP32-C3 SuperMini
-> is supported for single-strip installs. See
-> [docs/HARDWARE.md](docs/HARDWARE.md) for the full board recommendation
-> table and known issues.
+> Kept from v6.0: ESP-IDF + FreeRTOS task model, OTA with rollback,
+> captive portal, PBKDF2-SHA256 auth, Kalman motion filter, the full
+> Preact web UI (now six screens — Live, LEDs, Motion, Hardware,
+> Network, System), and the runtime board picker.
+>
+> Removed in v6.x: the Mesh tab, ESP-NOW peer broadcast, pairing window,
+> coordinator election, fusion-priority modes, topology gossip, and the
+> LD2410-family radar drivers (LD2450 only on shipping hardware; the
+> `sim` driver remains for desk testing).
+>
+> **Hardware: ESP32-C3 SuperMini + LD2450.** Single-core C3 is sufficient
+> now that there's no peer broadcast / no coordinator state / no second
+> sensor to fuse with. See [docs/HARDWARE.md](docs/HARDWARE.md) for
+> wiring and the PCB-rev power-rail recommendations.
+>
+> **📦 [v6.1.0-alpha.1 pre-release →](https://github.com/Techposts/AmbiSense/releases/tag/v6.1.0-alpha.1)** — first v6.x cut, prebuilt C3 binaries attached. See the release notes for the detailed "why we dropped mesh / multi-device" rationale.
+>
+> **📚 [Wiki →](https://github.com/Techposts/AmbiSense/wiki)** — user-facing guides: getting started, hardware setup, LD2450 mounting, web UI tour, troubleshooting, FAQ, migration from v6.0.
 >
 > | Branch / tag | Purpose |
 > |---|---|
-> | `main` | v6.0.0 — current canonical firmware (this branch) |
-> | `v6-idf-rewrite` | active dev branch for v6.x work (encrypted ESP-NOW, S3 dual-core, auto-topology) |
+> | `main` | v6.0.0 — last dual-device firmware (this branch through v6.0.0; v6.x lands on top) |
+> | `v6-idf-rewrite` | active dev branch — single-sensor PCB rev |
 > | `legacy/v5-arduino` | frozen archive of the v5.x Arduino line — reference only |
-> | tag `v6.0.0` | shipped release with prebuilt C3 binaries on the release page |
+> | tag `v6.1.0-alpha.1` | first v6.x pre-release (single-sensor) |
+> | tag `v6.0.0` | shipped release with prebuilt C3 binaries (last dual-device) |
 > | tag `v5.1.1` | last Arduino-era release |
+>
+> ⚠️ The "Multi-Sensor Networks" / "Master / Slave" / "Network Topology"
+> sections further down this README describe v5 + v6.0 behaviour and are
+> retained as historical reference. They no longer apply to v6.x.
 
 If you cloned this repo before v6.0.0 landed and your local `main` still
 reflects the old Arduino tree, run `git fetch && git reset --hard origin/main`
@@ -38,29 +53,34 @@ once after the merge to come up to speed. The Arduino code is preserved on
 `legacy/v5-arduino` and under `legacy/AmbiSense/` if you want to keep
 running v5.
 
-## v6 quickstart (ESP-IDF v5.5.2)
+## v6.x quickstart (ESP-IDF v5.5.2)
 
-**Easiest path** — flash the pre-built C3 binary from the
-[v6.0.0 release page](https://github.com/Techposts/AmbiSense/releases/tag/v6.0.0):
+**Easiest path** — flash the prebuilt C3 binaries from the
+[v6.1.0-alpha.1 pre-release](https://github.com/Techposts/AmbiSense/releases/tag/v6.1.0-alpha.1):
 
 ```sh
 pip install esptool
-python -m esptool --chip esp32c3 -p /dev/ttyUSB0 -b 460800 \
+python -m esptool --chip esp32c3 -p /dev/cu.usbmodem... -b 460800 \
     --before default_reset --after hard_reset write_flash \
     --flash_mode dio --flash_size 4MB --flash_freq 80m \
-    0x0     bootloader-c3-v6.0.0.bin \
-    0x8000  partition-table-c3-v6.0.0.bin \
-    0x10000 ambisense-c3-v6.0.0.bin
+    0x0     bootloader-c3-v6.1.0-alpha.1.bin \
+    0x8000  partition-table-c3-v6.1.0-alpha.1.bin \
+    0xd000  ota-data-initial-c3-v6.1.0-alpha.1.bin \
+    0x10000 ambisense-c3-v6.1.0-alpha.1.bin
 ```
+
+If `esptool` reports `Failed to connect to ESP32-C3: No serial data received`, do the BOOT-mode dance: hold `BOOT`, tap `RST` while still holding, release `BOOT` after ~1 s, retry. Full troubleshooting ladder in the [wiki](https://github.com/Techposts/AmbiSense/wiki/Troubleshooting#flash-fails-with-no-serial-data-received).
 
 **Build from source** — you need ESP-IDF v5.5.2 installed (`~/esp/esp-idf-v5.5.2/`):
 
 ```sh
 git clone https://github.com/Techposts/AmbiSense.git
-cd AmbiSense/firmware
-. ~/esp/esp-idf-v5.5.2/export.sh
+cd AmbiSense
+git checkout v6-idf-rewrite          # v6.x development branch
 
-idf.py set-target esp32c3        # or: esp32, esp32s3, esp32c6
+cd firmware
+. ~/esp/esp-idf-v5.5.2/export.sh
+idf.py set-target esp32c3
 idf.py build flash monitor
 ```
 
@@ -69,9 +89,10 @@ your phone — the captive portal pops at `http://192.168.4.1/`. Enter
 home Wi-Fi creds; the device joins and is reachable as
 `http://ambisense-XXXX.local/`.
 
-**Recommended hardware**: ESP32-S3 DevKitC-1 or S3-Zero (dual-core,
-native USB). **Supported**: ESP32-C3 SuperMini for single-strip installs.
-See [docs/HARDWARE.md](docs/HARDWARE.md) for the full table and known
+**Hardware**: v6.x ships on the ESP32-C3 SuperMini + LD2450. The C3 is
+single-core but with no peer broadcast / no second sensor it has plenty
+of headroom for radar UART + Kalman + WS + LED render. See
+[docs/HARDWARE.md](docs/HARDWARE.md) for the PCB-rev wiring and known
 issues.
 
 VSCode users: install Espressif's ESP-IDF extension to get IntelliSense
@@ -79,13 +100,23 @@ for IDF headers — without it, clangd will report
 `'esp_err.h' file not found` and similar; the code still builds
 correctly via `idf.py`.
 
-## v6 documentation
+## Documentation
+
+**[📚 Wiki](https://github.com/Techposts/AmbiSense/wiki)** is the user-facing documentation. Start here if you're installing AmbiSense:
+- [Getting Started](https://github.com/Techposts/AmbiSense/wiki/Getting-Started) — buy parts, flash, first boot
+- [LD2450 Mounting Guide](https://github.com/Techposts/AmbiSense/wiki/LD2450-Mounting-Guide) — critical for v6.x single-sensor coverage
+- [Web UI Tour](https://github.com/Techposts/AmbiSense/wiki/Web-UI-Tour) — every screen, every control
+- [Migration from v6.0](https://github.com/Techposts/AmbiSense/wiki/Migration-from-v6.0) — for users on the dual-device build
+- [FAQ](https://github.com/Techposts/AmbiSense/wiki/FAQ) — including detailed "Why was the mesh dropped?" reasoning
+- [Troubleshooting](https://github.com/Techposts/AmbiSense/wiki/Troubleshooting) — common issues + fixes
+
+Developer-facing docs in the repo:
 
 | Document | Read when |
 |---|---|
-| [docs/V6-ARCHITECTURE.md](docs/V6-ARCHITECTURE.md) | Picking up the v6 rewrite cold — this captures the locked architectural decisions (peer mesh, modular radar drivers, NVS schema, board profiles). Read first before proposing any structural change. |
-| [docs/V6-ROADMAP.md](docs/V6-ROADMAP.md) | Planning what to build next — the 5-PR plan with status per PR and the tag/release cadence. |
-| [docs/HARDWARE.md](docs/HARDWARE.md) | Building or debugging hardware — reference wiring for C3 SuperMini, board profiles, sensor pinouts, and a flash-fails-to-connect troubleshooting ladder. |
+| [docs/V6-ARCHITECTURE.md](docs/V6-ARCHITECTURE.md) | Picking up the v6 rewrite cold — locked architectural decisions (single-sensor LD2450, NVS schema, board profiles). Read first before proposing any structural change. |
+| [docs/V6-ROADMAP.md](docs/V6-ROADMAP.md) | What's planned next — PR record + v6.x roadmap (PCB, 2-D zone mapping, signed OTA). |
+| [docs/HARDWARE.md](docs/HARDWARE.md) | Reference wiring, board profiles, sensor pinouts, exhaustive troubleshooting ladder. |
 
 ## Repo layout
 

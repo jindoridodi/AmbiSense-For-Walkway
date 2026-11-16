@@ -1,13 +1,22 @@
-/** All seven screens: Live, LEDs, Motion, Mesh, Hardware, Network, System.
- *  Faithful port of frontend/design-source/. Every control wires to a real
+/** Six screens: Live, LEDs, Motion, Hardware, Network, System.
+ *  Single-device architecture (v6.x): every control wires to a local
  *  /api/* endpoint with optimistic updates + toast confirmation. */
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Card, Toggle, Field, Slider, Row, Dot, ColorPicker as PaletteColorPicker, useToaster } from './components';
 import { LedPreview, LED_MODE_NAMES } from './led_preview';
-import { Icon, Sparkline, fmtUptime, NumberAndSlider, DualHandleRange, TopologyDiagram, LineChart, hsv2rgb, rgb2hex, hex2rgb } from './atoms';
+import { Icon, Sparkline, fmtUptime, NumberAndSlider, DualHandleRange, LineChart, hsv2rgb, rgb2hex, hex2rgb } from './atoms';
 import { getJSON, postJSON, postBinary } from './api';
 
-interface Live { distance: number; direction: number; rssi: number; heap: number; uptime: number; peers: number; healthy: number; }
+interface Live {
+  distance: number; direction: number; rssi: number; heap: number; uptime: number;
+  /* Presence — populated by /api/live since v6.2.0-alpha.1. Optional
+   * for back-compat with older firmware that doesn't emit them. */
+  occupied?: boolean;
+  count?: number;
+  stationary?: boolean;
+  nearest_cm?: number;
+  seconds_since_seen?: number;
+}
 export interface AppState {
   live: Live;
   settings: any;
@@ -97,8 +106,8 @@ export function ScreenLive({ live, version, settings, setToast }: AppState) {
 
   return (
     <>
-      <PageHead title="Live" sub="Real-time radar, mesh, and LED output"
-        right={<span class="chip"><span class="dot dot-ok"/> WS connected · 5 Hz</span>}/>
+      <PageHead title="Live" sub="Real-time radar and LED output"
+        right={<span class="chip"><span class="dot dot-ok"/> WS connected · 20 Hz</span>}/>
 
       <div class="card" style={`padding: 18px; display: flex; align-items: center; gap: 16px; margin-bottom: 14px; ${sysEn ? 'background: linear-gradient(135deg, rgba(255,181,74,0.06), rgba(255,61,130,0.06)); border-color: rgba(255,122,61,0.25);' : ''}`}>
         <div style={`width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; background: ${sysEn ? 'var(--acc-grad)' : 'var(--bg-3)'}; color: ${sysEn ? '#1A0F08' : 'var(--text-3)'};`}>
@@ -106,7 +115,7 @@ export function ScreenLive({ live, version, settings, setToast }: AppState) {
         </div>
         <div style="flex: 1;">
           <div style="font-size: 15px; font-weight: 600;">System {sysEn ? 'active' : 'paused'}</div>
-          <div style="font-size: 12px; color: var(--text-2);">{sysEn ? 'Radar, mesh, and LED output running' : 'All output muted, mesh idle'}</div>
+          <div style="font-size: 12px; color: var(--text-2);">{sysEn ? 'Radar and LED output running' : 'All output muted'}</div>
         </div>
         <Toggle large value={sysEn} onChange={toggleSys}/>
       </div>
@@ -120,13 +129,20 @@ export function ScreenLive({ live, version, settings, setToast }: AppState) {
                 <div style="display: flex; align-items: baseline; gap: 8px; margin-top: 8px;">
                   <span class="mono dist-big">{dist}</span><span style="color: var(--text-2); font-size: 16px;">cm</span>
                 </div>
+                {/* Each chip gets a min-width sized for its widest possible
+                  * inner text + justify-content: center. Without this, the
+                  * direction chip flips between "still" / "closer →" / "away →"
+                  * and the in-window chip flips between "in window" / "outside",
+                  * which on each transition reflows this whole flex row and
+                  * — because .distance-row's right column has flex: 1 — tugs
+                  * the sparkline horizontally. Fixed widths kill the wobble. */}
                 <div style="display: flex; gap: 10px; margin-top: 14px; align-items: center; flex-wrap: wrap;">
-                  <span class="chip" style={`color: ${inWindow ? 'var(--ok)' : 'var(--text-2)'};`}>
+                  <span class="chip" style={`color: ${inWindow ? 'var(--ok)' : 'var(--text-2)'}; min-width: 92px; justify-content: center;`}>
                     <span class={`dot ${inWindow ? 'dot-ok' : 'dot-off'}`}/>{inWindow ? 'in window' : 'outside'}
                   </span>
-                  <span class="chip">min {minD}</span>
-                  <span class="chip">max {maxD}</span>
-                  <span class="chip">{live.direction === 0 ? 'still' : live.direction < 0 ? 'closer →' : 'away →'}</span>
+                  <span class="chip" style="min-width: 60px; justify-content: center;">min {minD}</span>
+                  <span class="chip" style="min-width: 60px; justify-content: center;">max {maxD}</span>
+                  <span class="chip" style="min-width: 78px; justify-content: center;">{live.direction === 0 ? 'still' : live.direction < 0 ? 'closer →' : 'away →'}</span>
                 </div>
               </div>
               <div class="dist-spark">
@@ -174,17 +190,6 @@ export function ScreenLive({ live, version, settings, setToast }: AppState) {
                 <DevField k="Firmware" v={version.version || '—'}/>
                 <DevField k="Board" v={version.board || '—'}/>
               </div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-head"><span class="smallcaps">Mesh</span><span class="chip">{live.peers > 0 ? 'peer' : 'standalone'}</span></div>
-            <div class="card-body">
-              <div style="font-size: 12px; color: var(--text-2); margin-bottom: 10px;">{live.peers || 0} peer{(live.peers||0) === 1 ? '' : 's'} · {live.healthy||0} healthy</div>
-              {(live.peers || 0) === 0 && (
-                <div style="font-size: 12px; color: var(--text-3); padding: 12px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px;">
-                  No peers discovered. Open Mesh tab to start a 30 s pairing window.
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -522,194 +527,135 @@ export function ScreenMotion({ settings, live, reload, setToast }: AppState) {
 }
 
 /* ================================================================= */
-/*                          D. MESH                                  */
+/*                          D. PRESENCE                              */
 /* ================================================================= */
-export function ScreenMesh({ live, settings, setToast, reload }: AppState) {
-  const [topology, setTopology] = useState<any>({ kind: 'straight', segments: [], total_leds: 30 });
-  const [mesh, setMesh] = useState<any>({ peers: [], fusion: 'most_recent', coordinator: true, pairing: false, pairing_ms_left: 0, my_mac: '' });
-  const [identifying, setIdentifying] = useState<string | null>(null);
+export function ScreenPresence({ live, settings, setToast, reload }: AppState) {
+  const occupied = !!live.occupied;
+  const count = live.count ?? 0;
+  const stationary = !!live.stationary;
+  const nearest = live.nearest_cm ?? -1;
+  const sinceSeen = live.seconds_since_seen ?? 0;
 
-  const refresh = () => Promise.all([
-    getJSON('/api/topology').then(setTopology),
-    getJSON('/api/mesh').then(setMesh),
-  ]).catch(() => {});
+  /* Vacancy timeout — exposed via /api/settings since the firmware
+   * persists it in the `presence` NVS namespace. Local state is the
+   * draft value; we debounce-save (300 ms) like the LED/motion sliders. */
+  const vacancy = settings.vacancy_secs ?? 60;
+  const [vacDraft, setVacDraft] = useState<number>(vacancy);
+  /* Sync draft to settings when settings refresh from server. */
+  useEffect(() => { setVacDraft(settings.vacancy_secs ?? 60); }, [settings.vacancy_secs]);
+  const save = useDebouncedSave(reload, setToast, 300);
 
-  /* Two polling cadences: 4 s when idle (cheap), 500 ms while pairing
-   * window is open (so the countdown ring updates in real time and we
-   * spot a new peer joining within half a second). The /api/mesh
-   * response carries pairing_ms_left from firmware — we never run a
-   * client-side countdown, so cancellation, OTA reboots, and pair-on-
-   * other-device events are all reflected accurately. */
-  useEffect(() => {
-    refresh();
-    const fast = mesh.pairing;
-    const id = setInterval(refresh, fast ? 500 : 4000);
-    return () => clearInterval(id);
-  }, [mesh.pairing]);
-
-  const startPair = async () => {
-    try { await postJSON('/api/mesh', { pair: true }); setToast('Pairing window open · 30 s'); refresh(); }
-    catch (e: any) { setToast(e.message || 'Pair failed', 'err'); }
+  const ip = (live as any).ip;
+  const haPrefix = `homeassistant`;
+  const fmtSinceSeen = (s: number) => {
+    if (s === 0 || sinceSeen === undefined) return '—';
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s/60)}m ${s%60}s`;
+    return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
   };
-
-  const identifyPeer = async (mac: string) => {
-    setIdentifying(mac);
-    try {
-      await postJSON('/api/mesh/identify', { mac });
-      setToast(`Identifying ${mac.slice(-5)}…`);
-    } catch (e: any) {
-      setToast(e.message || 'Identify failed', 'err');
-    }
-    setTimeout(() => setIdentifying(null), 5000);
-  };
-
-  const setTopo = async (kind: string) => {
-    try { await postJSON('/api/topology', { kind }); setToast('Topology saved'); refresh(); }
-    catch (e: any) { setToast(e.message || 'Save failed', 'err'); }
-  };
-
-  const setFusion = async (f: string) => {
-    try { await postJSON('/api/mesh', { fusion: f }); setToast('Priority saved'); refresh(); }
-    catch (e: any) { setToast(e.message || 'Save failed', 'err'); }
-  };
-
-  const topologies = [
-    { id: 'straight', name: 'Straight', desc: 'Single hallway run' },
-    { id: 'l_shape',  name: 'L-shape',  desc: 'One corner, two flights' },
-    { id: 'u_shape',  name: 'U-shape',  desc: 'Two corners, three flights' },
-    { id: 'custom',   name: 'Custom',   desc: 'Position pixels manually' },
-  ];
-  const priorities = [
-    { id: 'most_recent',  name: 'Most recent',  desc: 'Whichever device just saw motion' },
-    { id: 'slave_first',  name: 'Slave first',  desc: 'Slaves win unless silent for 2 s' },
-    { id: 'master_first', name: 'Master first', desc: 'Master wins unless silent for 2 s' },
-    { id: 'zone_based',   name: 'Zone based',   desc: 'Each device owns its segment range' },
-  ];
-
-  const myMac: string = mesh.my_mac || '';
-  const pairSecsLeft = Math.ceil((mesh.pairing_ms_left || 0) / 1000);
-  const pairProgress = Math.max(0, Math.min(1, (mesh.pairing_ms_left || 0) / 30000));
-
-  /* Rendering "this device + all peers" as one unified list keeps the
-   * mental model "every device is equal" — coordinator is just whoever
-   * has the lowest MAC at any given moment. */
-  const allDevices = [
-    { mac: myMac || '—', name: settings.device_name || 'this device', role: mesh.coordinator ? 'coordinator' : 'follower', rssi: live.rssi || -50, healthy: true, self: true },
-    ...(mesh.peers || []).map((p: any) => ({ ...p, role: 'follower', name: p.mac.slice(-5).toUpperCase(), self: false })),
-  ];
 
   return (
     <>
-      <PageHead title="Mesh & Topology" sub={`${(mesh.peers?.length || 0) + 1} device${(mesh.peers?.length || 0) ? 's' : ''} · ESP-NOW · ${(topology.kind || 'straight').replace('_', '-')}`}
-        right={<button class="btn btn-primary" onClick={startPair} disabled={mesh.pairing}>
-          {mesh.pairing ? <><Icon name="link" size={13}/> Listening · {pairSecsLeft}s</> : <><Icon name="plus" size={13}/> Pair new device</>}
-        </button>}/>
+      <PageHead title="Presence" sub="Room occupancy from radar — for stairs, hallways, or any space where you want to know if a human is present"/>
 
-      {/* Pairing card with circular SVG countdown — visual anchor that
-        * communicates "the device is actively listening RIGHT NOW" much
-        * more clearly than a number. */}
-      {mesh.pairing && (
-        <div class="card" style="padding: 16px; margin-bottom: 14px; background: linear-gradient(135deg, rgba(255,181,74,0.08), rgba(255,61,130,0.08)); border-color: rgba(255,122,61,0.45);">
-          <div style="display: flex; align-items: center; gap: 16px;">
-            <svg width="56" height="56" viewBox="0 0 56 56" style="flex-shrink: 0;">
-              <circle cx="28" cy="28" r="22" fill="none" stroke="var(--line)" stroke-width="3"/>
-              <circle cx="28" cy="28" r="22" fill="none" stroke="url(#pairgrad)" stroke-width="3"
-                stroke-dasharray={`${pairProgress * 138.2} 138.2`}
-                stroke-linecap="round" transform="rotate(-90 28 28)"
-                style="transition: stroke-dasharray 0.4s linear;"/>
-              <defs>
-                <linearGradient id="pairgrad" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stop-color="#FFB54A"/>
-                  <stop offset="50%" stop-color="#FF7A3D"/>
-                  <stop offset="100%" stop-color="#FF3D82"/>
-                </linearGradient>
-              </defs>
-              <text x="28" y="32" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text-0)">{pairSecsLeft}</text>
-            </svg>
-            <div style="flex: 1; min-width: 0;">
-              <div style="font-size: 14px; font-weight: 600; margin-bottom: 2px;">Pairing window open</div>
-              <div style="font-size: 12px; color: var(--text-2); line-height: 1.5;">
-                On the other device, either hold the BOOT button for 3 seconds <em>or</em> open its web UI and click <b>Pair new device</b>. They auto-connect — no need to click on both.
-              </div>
+      {/* Big status card — occupied or vacant, eye-catching. */}
+      <div class="card" style={`padding: 22px; margin-bottom: 14px; border-color: ${occupied ? 'rgba(74,222,128,0.5)' : 'var(--line)'}; background: ${occupied ? 'linear-gradient(135deg, rgba(74,222,128,0.07), rgba(74,222,128,0.02))' : 'transparent'};`}>
+        <div style="display: flex; align-items: center; gap: 18px; flex-wrap: wrap;">
+          <div style={`width: 56px; height: 56px; border-radius: 16px; display: flex; align-items: center; justify-content: center; background: ${occupied ? 'var(--ok)' : 'var(--bg-3)'}; color: ${occupied ? '#0a2014' : 'var(--text-3)'}; flex-shrink: 0;`}>
+            <Icon name="person" size={28} stroke={2}/>
+          </div>
+          <div style="flex: 1; min-width: 0;">
+            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+              <span style="font-size: 22px; font-weight: 600; letter-spacing: -0.02em;">{occupied ? 'Occupied' : 'Vacant'}</span>
+              {occupied && stationary && <span class="chip" style="color: var(--info);"><span class="dot dot-ok"/> stationary</span>}
+              {occupied && !stationary && <span class="chip"><span class="dot dot-ok"/> moving</span>}
+            </div>
+            <div style="font-size: 13px; color: var(--text-2); margin-top: 4px;">
+              {occupied
+                ? `${count} target${count === 1 ? '' : 's'} detected${nearest >= 0 ? ` · nearest ${nearest} cm away` : ''}`
+                : `Last detection ${fmtSinceSeen(sinceSeen)} ago`}
             </div>
           </div>
         </div>
-      )}
+      </div>
 
+      {/* Tile row — count, nearest, vacancy state. */}
+      <div class="dash-grid" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px;">
+        <StatTilePresence label="Targets" value={`${count}`} sub={count === 1 ? 'person' : 'people'} accent={occupied}/>
+        <StatTilePresence label="Nearest" value={occupied && nearest >= 0 ? `${nearest}` : '—'} sub={occupied && nearest >= 0 ? 'cm' : 'no target'} accent={occupied}/>
+        <StatTilePresence label="Last seen" value={fmtSinceSeen(sinceSeen)} sub={occupied ? 'now' : 'ago'} accent={false}/>
+      </div>
+
+      {/* Vacancy timeout config */}
       <div class="card" style="margin-bottom: 14px;">
-        <div class="card-head"><span class="smallcaps">Topology</span></div>
+        <div class="card-head"><span class="smallcaps">Vacancy timeout</span></div>
         <div class="card-body">
-          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px;">
-            {topologies.map(t => {
-              const active = topology.kind === t.id;
-              return (
-                <button onClick={() => setTopo(t.id)} style={`padding: 14px; border-radius: 10px; text-align: left; background: ${active ? 'linear-gradient(135deg, rgba(255,181,74,0.06), rgba(255,61,130,0.06))' : 'var(--bg-1)'}; border: ${active ? '1px solid rgba(255,122,61,0.55)' : '1px solid var(--line)'}; cursor: pointer; color: inherit;`}>
-                  <div style="height: 70px; margin-bottom: 8px;"><TopologyDiagram kind={t.id as any}/></div>
-                  <div style="font-size: 13px; font-weight: 600;">{t.name}</div>
-                  <div style="font-size: 11px; color: var(--text-3);">{t.desc}</div>
-                </button>
-              );
-            })}
+          <NumberAndSlider
+            label="Hold occupied for N seconds after last detection"
+            value={vacDraft}
+            onChange={(v) => { setVacDraft(v); save({ vacancy_secs: v }); }}
+            min={5} max={600} step={1} suffix="seconds"/>
+          <div style="font-size: 11px; color: var(--text-3); margin-top: 10px; line-height: 1.5;">
+            How long to keep reporting <b>Occupied</b> after the radar last detected a target. Higher values mask brief drop-outs (e.g. someone briefly steps behind a wall) but slow vacancy detection.<br/>
+            Recommended: <b>30–60 s</b> for hallways, <b>120–300 s</b> for couches / desks where the user sits still for long stretches and you want LD2410C-class robustness even from an LD2450 sensor.
           </div>
         </div>
       </div>
 
+      {/* Sensor recommendation card */}
       <div class="card" style="margin-bottom: 14px;">
-        <div class="card-head" style="display: flex; justify-content: space-between; align-items: center;">
-          <span class="smallcaps">Devices</span>
-          <span style="font-size: 11px; color: var(--text-3);">Click <b>Identify</b> to make a device blink — useful while wiring topology</span>
-        </div>
-        <div class="card-body" style="display: flex; flex-direction: column; gap: 8px;">
-          {allDevices.map((d: any) => {
-            const isIdentifying = identifying === d.mac;
-            return (
-              <div style={`display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: ${d.self ? 'linear-gradient(135deg, rgba(255,181,74,0.04), rgba(255,61,130,0.04))' : 'var(--bg-1)'}; border: 1px solid ${d.self ? 'rgba(255,122,61,0.35)' : 'var(--line-soft)'}; border-radius: 10px;`}>
-                <span class={`dot ${d.healthy ? 'dot-ok' : 'dot-err'}`}/>
-                <div style="flex: 1; min-width: 0;">
-                  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                    <span style="font-size: 13px; font-weight: 500;">{d.name}</span>
-                    <span class="chip" style="text-transform: capitalize;">{d.role}</span>
-                    {d.self && <span class="chip" style="background: rgba(255,122,61,0.15); color: var(--acc-orange);">this device</span>}
-                  </div>
-                  <div class="mono" style="font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis;">{d.mac}</div>
-                </div>
-                <div class="mono" style="font-size: 11px; color: var(--text-2); text-align: right; flex-shrink: 0;">
-                  <div>{d.rssi || '—'} dBm</div>
-                </div>
-                {!d.self && (
-                  <button class="btn btn-sm btn-ghost" disabled={isIdentifying}
-                    onClick={() => identifyPeer(d.mac)} style="flex-shrink: 0;">
-                    {isIdentifying ? <><Icon name="check" size={12}/> Blinking…</> : <><Icon name="search" size={12}/> Identify</>}
-                  </button>
-                )}
-              </div>
-            );
-          })}
-          {allDevices.length <= 1 && (
-            <div style="font-size: 12px; color: var(--text-3); padding: 12px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px;">
-              No peers paired yet. Click <b>Pair new device</b> above to start a 30-second pairing window.
-            </div>
-          )}
+        <div class="card-head"><span class="smallcaps">Choosing the right radar</span></div>
+        <div class="card-body" style="font-size: 13px; color: var(--text-2); line-height: 1.6;">
+          <div style="margin-bottom: 8px;"><b>LD2450</b> (kit default) — best when you also want the LED follow-me feature, or for installs where targets are usually moving. Detects up to 3 people; provides x/y/speed.</div>
+          <div style="margin-bottom: 8px;"><b>LD2410C</b> — best for static-presence installs where someone sits still for long periods (couch, desk, bed). Native micro-motion detection picks up breathing-level movement that an LD2450 might drop after ~30–60 s of stillness.</div>
+          <div style="font-size: 11px; color: var(--text-3); margin-top: 10px;">Switch in <b>Hardware → Radar kind</b> · reboot to apply.</div>
         </div>
       </div>
 
+      {/* Home Assistant integration hint — leads with MQTT + smartghar */}
       <div class="card">
-        <div class="card-head"><span class="smallcaps">Sensor priority</span></div>
-        <div class="card-body">
-          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px;">
-            {priorities.map(p => {
-              const active = mesh.fusion === p.id;
-              return (
-                <button onClick={() => setFusion(p.id)} style={`padding: 14px; border-radius: 10px; text-align: left; background: ${active ? 'linear-gradient(135deg, rgba(255,181,74,0.06), rgba(255,61,130,0.06))' : 'var(--bg-1)'}; border: ${active ? '1px solid rgba(255,122,61,0.55)' : '1px solid var(--line)'}; cursor: pointer; color: inherit;`}>
-                  <div style="font-size: 13px; font-weight: 600;">{p.name}</div>
-                  <div style="font-size: 11px; color: var(--text-3); margin-top: 2px;">{p.desc}</div>
-                </button>
-              );
-            })}
+        <div class="card-head"><span class="smallcaps">Home Assistant</span><span class="chip">MQTT recommended</span></div>
+        <div class="card-body" style="font-size: 13px; color: var(--text-2); line-height: 1.6;">
+          <div style="margin-bottom: 10px;">
+            <b>Recommended:</b> install the <a href="https://github.com/Techposts/smartghar-homeassistant" target="_blank" rel="noopener" style="color: var(--info);">smartghar Home Assistant integration</a> and configure MQTT in <b>System → Home Assistant / MQTT</b>. The integration auto-discovers AmbiSense (and other Techposts devices like TankSync) from your broker — no HA YAML editing.
           </div>
+          <div style="font-size: 11px; color: var(--text-3); margin-bottom: 12px;">
+            Or enable "HA native auto-discovery" in the same System tab card to make stock HA auto-create entities without the custom integration.
+          </div>
+          <details style="margin-top: 8px;">
+            <summary style="cursor: pointer; font-size: 12px; color: var(--text-2);">Or use a RESTful sensor (no MQTT)</summary>
+            <pre style="background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 11px; overflow-x: auto; margin-top: 10px;">
+{`# configuration.yaml — pulls /api/presence over HTTP
+binary_sensor:
+  - platform: rest
+    resource: http://${(settings.hostname || 'ambisense')}.local/api/presence
+    name: AmbiSense Presence
+    value_template: "{{ value_json.occupied }}"
+    payload_on: "true"
+    payload_off: "false"
+    scan_interval: 5
+sensor:
+  - platform: rest
+    resource: http://${(settings.hostname || 'ambisense')}.local/api/presence
+    name: AmbiSense Distance
+    value_template: "{{ value_json.nearest_cm }}"
+    unit_of_measurement: cm
+    scan_interval: 5`}
+            </pre>
+          </details>
         </div>
       </div>
     </>
+  );
+}
+
+function StatTilePresence({ label, value, sub, accent }: { label: string; value: string; sub: string; accent: boolean }) {
+  return (
+    <div class="card" style="padding: 14px;">
+      <div class="smallcaps">{label}</div>
+      <div class="mono" style={`font-size: 22px; font-weight: 500; margin-top: 6px; letter-spacing: -0.02em; color: ${accent ? 'var(--ok)' : 'var(--text-0)'};`}>{value}</div>
+      <div style="font-size: 11px; color: var(--text-3); margin-top: 2px;">{sub}</div>
+    </div>
   );
 }
 
@@ -862,17 +808,39 @@ export function ScreenHardware({ setToast, reload }: AppState) {
 /* ================================================================= */
 /*                          F. NETWORK                               */
 /* ================================================================= */
+type JoinModalState =
+  | { phase: 'connecting'; ssid: string }
+  | { phase: 'success'; ssid: string; ip: string; hostname: string }
+  | { phase: 'failed'; ssid: string; error: string };
+
 export function ScreenNetwork({ setToast }: AppState) {
   const [wifi, setWifi] = useState<any>(null);
   const [scan, setScan] = useState<any[] | null>(null);
   const [pwd, setPwd] = useState('');
   const [host, setHost] = useState('');
-  const [apMode, setApMode] = useState('auto');
   const [confirm, setConfirm] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [joinSsid, setJoinSsid] = useState<string | null>(null);
+  const [joinModal, setJoinModal] = useState<JoinModalState | null>(null);
+  const cancelPoll = useRef<{ cancelled: boolean } | null>(null);
+  const joinCardRef = useRef<HTMLDivElement>(null);
+  const pwdInputRef = useRef<HTMLInputElement>(null);
 
-  const refresh = () => getJSON('/api/wifi').then(w => { setWifi(w); setApMode(w.ap_mode); setHost(w.hostname || ''); });
+  const refresh = () => getJSON('/api/wifi').then(w => { setWifi(w); setHost(w.hostname || ''); });
+
+  /* When Join is tapped, the password card slides in below the network
+   * list. On mobile that often lands off-screen, so scroll it into view
+   * and auto-focus the password input — saves a tap on mobile and an
+   * eyeball-flick on desktop. */
+  useEffect(() => {
+    if (!joinSsid) return;
+    /* Defer one tick so the join card has rendered. */
+    const t = setTimeout(() => {
+      joinCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      pwdInputRef.current?.focus();
+    }, 50);
+    return () => clearTimeout(t);
+  }, [joinSsid]);
   const doScan = async () => {
     setScanning(true);
     try { const r = await getJSON('/api/wifi/scan'); setScan(r.networks); }
@@ -881,17 +849,76 @@ export function ScreenNetwork({ setToast }: AppState) {
   };
   useEffect(() => { refresh(); }, []);
 
+  /* Drive the connecting -> success / failed flow:
+   *  1. POST credentials.
+   *  2. Poll /api/wifi every 1.5 s for up to 25 s.
+   *  3. As soon as sta_connected is true and an IP is assigned, flip
+   *     the modal to the success state showing the new URL — and STOP
+   *     polling (the AP will tear down a few seconds later, and the
+   *     frontend on the captive-portal browser would otherwise see
+   *     network errors after that point).
+   *  4. On 25 s timeout, show a failed modal — the firmware drops back
+   *     to AP mode automatically, so the user can retry without
+   *     re-pairing their phone to the AP. */
   const join = async () => {
     if (!joinSsid) return;
-    try { await postJSON('/api/wifi', { ssid: joinSsid, pass: pwd, hostname: host || undefined }); setToast('Saved · reconnecting'); setJoinSsid(null); setPwd(''); setTimeout(refresh, 4000); }
-    catch (e: any) { setToast(e.message || 'Join failed', 'err'); }
+    const ssidToJoin = joinSsid;
+    setJoinModal({ phase: 'connecting', ssid: ssidToJoin });
+    setJoinSsid(null);
+
+    cancelPoll.current = { cancelled: false };
+    const token = cancelPoll.current;
+
+    try {
+      await postJSON('/api/wifi', { ssid: ssidToJoin, pass: pwd, hostname: host || undefined });
+    } catch (e: any) {
+      if (!token.cancelled) setJoinModal({ phase: 'failed', ssid: ssidToJoin, error: e.message || 'Save failed' });
+      return;
+    }
+    setPwd('');
+
+    const start = Date.now();
+    const poll = async () => {
+      if (token.cancelled) return;
+      if (Date.now() - start > 25000) {
+        setJoinModal({ phase: 'failed', ssid: ssidToJoin, error: 'Connection timed out — check the password and try again.' });
+        return;
+      }
+      try {
+        const w = await getJSON('/api/wifi');
+        if (token.cancelled) return;
+        if (w.sta_connected && w.ip) {
+          setWifi(w);
+          setJoinModal({ phase: 'success', ssid: ssidToJoin, ip: w.ip, hostname: w.hostname || 'ambisense' });
+          return;
+        }
+      } catch {}
+      setTimeout(poll, 1500);
+    };
+    /* Initial 2.5 s delay: webui spawns wifi_apply_task with a 200 ms
+     * grace, then netmgr_set_credentials runs sync STA association.
+     * Polling sooner just wastes round-trips before any state could
+     * possibly have changed. */
+    setTimeout(poll, 2500);
   };
-  const saveApMode = async (m: string) => { setApMode(m); try { await postJSON('/api/wifi', { ap_mode: m }); setToast('AP mode saved'); refresh(); } catch (e: any) { setToast(e.message, 'err'); } };
+
+  const dismissJoinModal = () => {
+    if (cancelPoll.current) cancelPoll.current.cancelled = true;
+    setJoinModal(null);
+    refresh();
+  };
   const saveHost = async () => { try { await postJSON('/api/wifi', { hostname: host }); setToast('Hostname saved'); } catch (e: any) { setToast(e.message, 'err'); } };
+  /* "Reset Wi-Fi" is fire-and-forget from the browser's perspective —
+   * the device disconnects from STA before it finishes responding, so
+   * the POST will always either time out or error from this side. We
+   * show the success toast optimistically, then fire the request and
+   * swallow the inevitable network error. */
   const forget = async () => {
     if (!confirm) { setConfirm(true); return; }
-    try { await postJSON('/api/wifi', { forget_sta: true }); setToast('Reset · device returns to AP mode'); setConfirm(false); refresh(); }
-    catch (e: any) { setToast(e.message, 'err'); }
+    setConfirm(false);
+    setToast('Wi-Fi reset · device returning to AP mode');
+    try { await postJSON('/api/wifi', { forget_sta: true }); } catch { /* expected — STA dropped */ }
+    setTimeout(refresh, 2500);
   };
 
   if (!wifi) return <><PageHead title="Network"/><div class="card"><div class="card-body">Loading…</div></div></>;
@@ -947,49 +974,170 @@ export function ScreenNetwork({ setToast }: AppState) {
       </div>
 
       {joinSsid && (
-        <div class="card" style="margin-bottom: 14px; padding: 14px; border-color: var(--acc-orange);">
+        <div ref={joinCardRef} class="card" style="margin-bottom: 14px; padding: 14px; border-color: var(--acc-orange); scroll-margin-top: 80px;">
           <div class="smallcaps" style="margin-bottom: 8px;">Join "{joinSsid}"</div>
-          <input class="input" type="password" value={pwd} placeholder="Password (leave blank for open)" onInput={(e) => setPwd((e.target as HTMLInputElement).value)} style="margin-bottom: 8px;"/>
-          <div style="display: flex; gap: 8px;">
-            <button class="btn btn-primary" onClick={join}>Connect</button>
-            <button class="btn" onClick={() => { setJoinSsid(null); setPwd(''); }}>Cancel</button>
+          <input
+            ref={pwdInputRef}
+            class="input"
+            type="password"
+            value={pwd}
+            placeholder="Password (leave blank for open)"
+            onInput={(e) => setPwd((e.target as HTMLInputElement).value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') join(); }}
+            style="margin-bottom: 10px; width: 100%; box-sizing: border-box;"
+            autoComplete="current-password"
+          />
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button class="btn btn-primary" onClick={join} style="flex: 1; min-width: 100px;">Connect</button>
+            <button class="btn" onClick={() => { setJoinSsid(null); setPwd(''); }} style="flex: 0 0 auto;">Cancel</button>
           </div>
         </div>
       )}
 
-      <div class="hw-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
-        <div class="card">
-          <div class="card-head"><span class="smallcaps">Hostname</span></div>
-          <div class="card-body">
-            <span class="field-label">mDNS name</span>
-            <div style="display: flex; gap: 6px; align-items: center;">
-              <input class="input mono" value={host} onInput={(e) => setHost((e.target as HTMLInputElement).value.replace(/[^a-z0-9-]/g, ''))}/>
-              <span class="mono" style="font-size: 12px; color: var(--text-3);">.local</span>
-              <button class="btn btn-sm" onClick={saveHost}>Save</button>
-            </div>
+      <div class="card">
+        <div class="card-head"><span class="smallcaps">Hostname</span></div>
+        <div class="card-body">
+          <span class="field-label">mDNS name</span>
+          <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+            <input class="input mono" value={host}
+              onInput={(e) => setHost((e.target as HTMLInputElement).value.replace(/[^a-z0-9-]/g, ''))}
+              style="flex: 1 1 160px; min-width: 0;"/>
+            <span class="mono" style="font-size: 12px; color: var(--text-3);">.local</span>
+            <button class="btn btn-sm" onClick={saveHost}>Save</button>
           </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><span class="smallcaps">AP behaviour</span></div>
-          <div class="card-body" style="display: flex; flex-direction: column; gap: 8px;">
-            {[
-              { id: 'auto', name: 'Auto', desc: 'AP off when STA connected' },
-              { id: 'always', name: 'Always on', desc: 'AP up at all times — local fallback' },
-              { id: 'sta_only', name: 'STA only', desc: 'AP off, ESP-NOW uses STA channel' },
-            ].map(m => {
-              const on = apMode === m.id;
-              return (
-                <button onClick={() => saveApMode(m.id)} style={`text-align: left; padding: 10px 12px; border-radius: 8px; background: ${on ? 'rgba(255,122,61,0.08)' : 'var(--bg-1)'}; border: ${on ? '1px solid rgba(255,122,61,0.55)' : '1px solid var(--line)'}; cursor: pointer; color: inherit;`}>
-                  <div style="font-size: 13px; font-weight: 500;">{m.name}</div>
-                  <div style="font-size: 11px; color: var(--text-3);">{m.desc}</div>
-                </button>
-              );
-            })}
+          <div style="font-size: 11px; color: var(--text-3); margin-top: 8px; line-height: 1.5;">
+            The Wi-Fi access point comes up automatically while the device isn't connected to your home network, and shuts down a few seconds after a successful join.
           </div>
         </div>
       </div>
+
+      {joinModal && <JoinModal state={joinModal} onClose={dismissJoinModal} onRetry={(ssid) => { setJoinModal(null); setJoinSsid(ssid); }}/>}
     </>
+  );
+}
+
+function Spinner({ size = 24 }: { size?: number }) {
+  return (
+    <div style={`width: ${size}px; height: ${size}px; border: 2.5px solid var(--line); border-top-color: var(--acc-orange); border-radius: 50%; animation: spinner 0.8s linear infinite; flex-shrink: 0;`}/>
+  );
+}
+
+/* Copy `text` to the clipboard. Modern Clipboard API requires a secure
+ * context (HTTPS / localhost); since we're served over HTTP from a LAN
+ * IP, we fall back to the legacy execCommand path on insecure origins.
+ * Returns true on success. */
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function CopyableUrl({ label, url }: { label: string; url: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    const ok = await copyToClipboard(url);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+  return (
+    <div style="display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px;">
+      <div style="flex: 1; min-width: 0;">
+        <div style="font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px;">{label}</div>
+        <a href={url} target="_blank" rel="noopener" class="mono" style="font-size: 13px; color: var(--text-0); text-decoration: none; word-break: break-all;">{url}</a>
+      </div>
+      <button class="btn btn-sm" onClick={copy} style="flex-shrink: 0;">
+        {copied ? <><Icon name="check" size={12}/> Copied</> : 'Copy'}
+      </button>
+    </div>
+  );
+}
+
+function JoinModal({ state, onClose, onRetry }: {
+  state: JoinModalState;
+  onClose: () => void;
+  onRetry: (ssid: string) => void;
+}) {
+  return (
+    <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.65); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 12px;"
+         onClick={(e) => { if (e.target === e.currentTarget && state.phase !== 'connecting') onClose(); }}>
+      <div class="card" style="max-width: 480px; width: 100%; padding: 20px; max-height: 90vh; overflow-y: auto; box-sizing: border-box;">
+        {state.phase === 'connecting' && (
+          <>
+            <div class="smallcaps" style="margin-bottom: 12px;">Connecting to "{state.ssid}"</div>
+            <div style="display: flex; align-items: center; gap: 16px;">
+              <Spinner size={28}/>
+              <div style="font-size: 13px; color: var(--text-2); line-height: 1.5;">
+                The device is joining your home Wi-Fi.<br/>
+                This usually takes 5–15 seconds.
+              </div>
+            </div>
+            <div style="font-size: 11px; color: var(--text-3); margin-top: 14px; line-height: 1.5;">
+              Keep your phone connected to the AmbiSense access point until you see the success message.
+            </div>
+            <div style="display: flex; justify-content: flex-end; margin-top: 18px;">
+              <button class="btn" onClick={onClose}>Cancel</button>
+            </div>
+          </>
+        )}
+        {state.phase === 'success' && (
+          <>
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 14px;">
+              <span class="dot dot-ok" style="width: 10px; height: 10px;"/>
+              <span style="font-size: 16px; font-weight: 600;">Connected!</span>
+            </div>
+            <div style="font-size: 13px; color: var(--text-2); margin-bottom: 14px; line-height: 1.55;">
+              Your AmbiSense joined <b>"{state.ssid}"</b>. Reconnect your phone to your home Wi-Fi, then open one of these addresses:
+            </div>
+            <CopyableUrl label="mDNS hostname" url={`http://${state.hostname}.local/`}/>
+            <CopyableUrl label="IP address" url={`http://${state.ip}/`}/>
+            <div style="font-size: 11px; color: var(--text-3); margin-top: 12px; line-height: 1.55;">
+              The mDNS hostname is friendlier but doesn't work on every router; use the IP if .local doesn't resolve.<br/>
+              The AmbiSense access point will turn off automatically in about 30 seconds.
+            </div>
+            <div style="display: flex; justify-content: flex-end; margin-top: 18px;">
+              <button class="btn btn-primary" onClick={onClose}>Done</button>
+            </div>
+          </>
+        )}
+        {state.phase === 'failed' && (
+          <>
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px;">
+              <Icon name="warn" size={18} style={{ color: 'var(--err)' }}/>
+              <span style="font-size: 16px; font-weight: 600;">Couldn't connect</span>
+            </div>
+            <div style="font-size: 13px; color: var(--text-2); margin-bottom: 12px; line-height: 1.55;">{state.error}</div>
+            <div style="font-size: 11px; color: var(--text-3); margin-bottom: 18px; line-height: 1.55;">
+              The device returned to AP mode. Double-check the password and SSID, then try again — your phone is still on the AmbiSense access point.
+            </div>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+              <button class="btn" onClick={onClose}>Close</button>
+              <button class="btn btn-primary" onClick={() => onRetry(state.ssid)}>Try again</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1062,9 +1210,9 @@ export function ScreenSystem({ version, setToast }: AppState) {
         <div class="card">
           <div class="card-head"><span class="smallcaps">Firmware</span><span class="chip mono">{version.version || '—'}</span></div>
           <div class="card-body" style="display: flex; flex-direction: column; gap: 12px;">
-            <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--bg-1); border-radius: 10px;">
+            <div class="fw-head" style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--bg-1); border-radius: 10px;">
               <Icon name="cpu" size={18} style={{ color: 'var(--text-2)' }}/>
-              <div style="flex: 1;">
+              <div style="flex: 1; min-width: 0;">
                 <div class="mono" style="font-size: 13px;">{version.version} <span style="color: var(--text-3);">· {version.target}</span></div>
                 <div style="font-size: 11px; color: var(--text-3);">ESP-IDF {version.idf_version} · built {version.build_date}</div>
               </div>
@@ -1110,6 +1258,20 @@ export function ScreenSystem({ version, setToast }: AppState) {
         </div>
       </div>
 
+      {/* SmartGhar HA integration card — local push, mDNS-discovered,
+          no broker setup required. */}
+      <div class="card" style="margin-bottom: 14px;">
+        <div class="card-head"><span class="smallcaps">Home Assistant</span><span class="chip">auto-discovery</span></div>
+        <div class="card-body" style="font-size: 13px; color: var(--text-2); line-height: 1.55;">
+          AmbiSense advertises itself on your network as a SmartGhar device. Install the <a href="https://github.com/Techposts/smartghar-homeassistant" target="_blank" rel="noopener" style="color: var(--info);">SmartGhar Home Assistant integration</a> and HA auto-discovers this device along with any other Techposts hardware on the network — no broker, no YAML, no per-device setup.
+          <div style="margin-top: 10px; padding: 10px 12px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; font-size: 11px; color: var(--text-3); line-height: 1.55;">
+            Discovery: mDNS service <code class="mono">_smartghar._tcp</code><br/>
+            Contract: <code class="mono">/api/v1/info</code> · <code class="mono">/api/v1/devices</code> · <code class="mono">/api/v1/stream</code> WS<br/>
+            For a curl-friendly REST integration without the custom component, see the <a href="https://github.com/Techposts/AmbiSense/wiki/Home-Assistant-Integration" target="_blank" rel="noopener" style="color: var(--info);">wiki</a>.
+          </div>
+        </div>
+      </div>
+
       <div class="card" style="margin-bottom: 14px;">
         <div class="card-head"><span class="smallcaps">Auth</span>
           <span class="chip" style={`color: ${authReq ? 'var(--ok)' : 'var(--text-2)'};`}>
@@ -1118,7 +1280,7 @@ export function ScreenSystem({ version, setToast }: AppState) {
         </div>
         <div class="card-body">
           <span class="field-label">Password (≥ 8 chars · empty disables auth)</span>
-          <div style="display: flex; gap: 6px;">
+          <div class="row-stack">
             <input class="input mono" type={showPwd ? 'text' : 'password'} value={pwd} placeholder="Set a password" onInput={(e) => setPwd((e.target as HTMLInputElement).value)}/>
             <button class="btn" onClick={() => setShowPwd(x => !x)}><Icon name={showPwd ? 'eyeOff' : 'eye'} size={14}/></button>
             <button class="btn btn-primary" onClick={setPassword}>{pwd ? 'Set password' : 'Disable auth'}</button>
@@ -1132,7 +1294,7 @@ export function ScreenSystem({ version, setToast }: AppState) {
       <div class="hw-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
         <div class="card">
           <div class="card-head"><span class="smallcaps">JSON config</span></div>
-          <div class="card-body" style="display: flex; gap: 8px;">
+          <div class="card-body row-stack" style="gap: 8px;">
             <button class="btn" onClick={exportConfig}><Icon name="download" size={13}/> Export</button>
             <button class="btn" onClick={() => setToast('Import: drag JSON → /api/settings (coming next)')}>
               <Icon name="upload" size={13}/> Import
@@ -1146,7 +1308,7 @@ export function ScreenSystem({ version, setToast }: AppState) {
             <div style="font-size: 12px; color: var(--text-2); margin-bottom: 10px;">
               Type <span class="mono" style="color: var(--err);">{version.hostname}</span> to confirm
             </div>
-            <div style="display: flex; gap: 6px;">
+            <div class="row-stack">
               <input class="input mono" value={confirmText} placeholder={version.hostname} onInput={(e) => setConfirmText((e.target as HTMLInputElement).value)}/>
               <button class="btn btn-danger" disabled={confirmText !== version.hostname}
                 style={`opacity: ${confirmText !== version.hostname ? 0.4 : 1};`}

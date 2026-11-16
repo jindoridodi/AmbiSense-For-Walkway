@@ -26,17 +26,19 @@
 #include "board.h"
 #include "led_engine.h"
 #include "radar.h"
-#include "topology.h"
-#include "mesh.h"
 #include "motion.h"
+#include "presence.h"
+#include "status_led.h"
 
 static const char *TAG = "webui";
 
-#define MAX_WS_CLIENTS 4
+#define MAX_WS_CLIENTS    4   /* /api/live consumers (the PWA dashboard) */
+#define MAX_V1_WS_CLIENTS 4   /* /api/v1/stream consumers (HA integration) */
 
 static struct {
     httpd_handle_t srv;
-    int ws_fds[MAX_WS_CLIENTS];
+    int ws_fds[MAX_WS_CLIENTS];        /* /api/live    — 20 Hz live frames */
+    int v1_ws_fds[MAX_V1_WS_CLIENTS];  /* /api/v1/stream — 3 s snapshots  */
     SemaphoreHandle_t lock;
     webui_live_t latest;
 } s_web;
@@ -614,12 +616,16 @@ static esp_err_t handle_board_post(httpd_req_t *req) {
 static esp_err_t handle_radar_kinds(httpd_req_t *req) {
     cJSON *r = cJSON_CreateObject();
     cJSON *arr = cJSON_AddArrayToObject(r, "kinds");
+    /* v6.2 sensor matrix. LD2450 is the kit default — covers stairwell
+     * follow-me AND moving-target presence. LD2410C is recommended for
+     * presence-only installs (couch/desk) where static detection
+     * matters more than (x, y). LD2410 is kept for legacy v5/v6.0
+     * hardware compat. */
     static const struct { const char *id; const char *display; bool xy; const char *note; } K[] = {
-        { "ld2410", "HiLink LD2410(B/C)", false, "single-target distance + presence (24 GHz)" },
-        { "ld2412", "HiLink LD2412",      false, "per-gate sensitivity tunable (24 GHz)" },
-        { "ld2420", "HiLink LD2420",      false, "presence only (24 GHz)" },
-        { "ld2450", "HiLink LD2450",      true,  "up to 3 targets, x/y/speed (24 GHz)" },
-        { "sim",    "Simulator",          true,  "synthetic distance traces for testing" },
+        { "ld2450",  "HiLink LD2450",  true,  "Stairwell follow-me + presence (recommended). Up to 3 targets, x/y/speed (24 GHz)." },
+        { "ld2410c", "HiLink LD2410C", false, "Presence-only: best for stationary detection (couch, desk). Single-target distance + state (24 GHz)." },
+        { "ld2410",  "HiLink LD2410(B)", false, "Legacy compat with v5/v6.0 hardware. Same protocol as LD2410C; pick LD2410C for new installs." },
+        { "sim",     "Simulator",      true,  "Synthetic distance traces for desk testing without a radar." },
     };
     for (size_t i = 0; i < sizeof(K)/sizeof(K[0]); ++i) {
         cJSON *o = cJSON_CreateObject();
@@ -631,7 +637,7 @@ static esp_err_t handle_radar_kinds(httpd_req_t *req) {
     }
     char active[16] = {0};
     settings_get_radar_kind(active, sizeof(active));
-    cJSON_AddStringToObject(r, "active", active[0] ? active : "ld2410");
+    cJSON_AddStringToObject(r, "active", active[0] ? active : "ld2450");
     return send_json(req, r);
 }
 
@@ -705,9 +711,9 @@ static esp_err_t handle_settings_get(httpd_req_t *req) {
     add_u32_if(r, "motion", "pg", "p_gain_x1k");
     add_u32_if(r, "motion", "ig", "i_gain_x1k");
 
-    /* Topology */
-    add_u8_if (r, "topo", "kind", "topology");
-    add_u32_if(r, "topo", "tot", "total_leds");
+    /* Presence vacancy timeout — exposed in /api/settings so the UI can
+     * render and update it via a single batched POST. */
+    cJSON_AddNumberToObject(r, "vacancy_secs", presence_get_vacancy_timeout());
 
     cJSON_AddBoolToObject(r, "auth_enabled", auth_is_enabled());
     return send_json(req, r);
@@ -746,8 +752,9 @@ static const struct setting_map {
     { "predict_x1k",      "motion", "pf",         '4' },
     { "p_gain_x1k",       "motion", "pg",         '4' },
     { "i_gain_x1k",       "motion", "ig",         '4' },
-    { "topology",         "topo",   "kind",       '8' },
-    { "total_leds",       "topo",   "tot",        '4' },
+    /* vacancy_secs is handled out-of-band (see handle_settings_post) so
+     * the in-memory presence state updates immediately. NVS persistence
+     * happens inside presence_set_vacancy_timeout(). */
 };
 
 static esp_err_t handle_settings_post(httpd_req_t *req) {
@@ -775,6 +782,13 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
                 break;
         }
     }
+    /* vacancy_secs is handled out-of-band so the in-memory value
+     * updates immediately (presence task picks it up next tick) without
+     * waiting for an NVS reload pass. */
+    cJSON *vac = cJSON_GetObjectItem(j, "vacancy_secs");
+    if (vac && cJSON_IsNumber(vac)) {
+        if (presence_set_vacancy_timeout((uint32_t)vac->valueint) == ESP_OK) updated++;
+    }
     cJSON_Delete(j);
     /* Push LED-engine + motion settings live without reboot. Both modules
      * are designed to re-read all NVS keys on reload; expensive but called
@@ -784,6 +798,29 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", true);
     cJSON_AddNumberToObject(r, "updated", updated);
+    return send_json(req, r);
+}
+
+/* ============================================================
+ *  /api/presence — current presence snapshot for room-presence /
+ *  Home Assistant integrations. WS clients get the same data inline
+ *  in /api/live every 50 ms; this REST endpoint is for HA's REST
+ *  sensor and curl debugging.
+ * ============================================================ */
+static esp_err_t handle_presence_get(httpd_req_t *req) {
+    presence_t p;
+    if (presence_get(&p) != ESP_OK) return send_err(req, 503, "presence not initialised");
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject (r, "occupied",       p.occupied);
+    cJSON_AddNumberToObject(r, "target_count",   p.target_count);
+    cJSON_AddBoolToObject (r, "stationary",     p.stationary);
+    cJSON_AddNumberToObject(r, "nearest_cm",     p.nearest_cm);
+    cJSON_AddNumberToObject(r, "vacancy_secs",   p.vacancy_secs);
+    if (p.ms_since_seen == UINT32_MAX) {
+        cJSON_AddNullToObject(r, "seconds_since_seen");
+    } else {
+        cJSON_AddNumberToObject(r, "seconds_since_seen", p.ms_since_seen / 1000);
+    }
     return send_json(req, r);
 }
 
@@ -823,165 +860,173 @@ static esp_err_t handle_radar_diag(httpd_req_t *req) {
 }
 
 /* ============================================================
- *  /api/mesh — peers, fusion, pairing
+ *  smartghar contract — /api/v1 endpoints consumed by the
+ *  smartghar Home Assistant integration:
+ *    https://github.com/Techposts/smartghar-homeassistant
+ *
+ *  Schema mirrors the aqualevel/TankSync hub firmware so the integration
+ *  treats AmbiSense as another smartghar hub. The integration:
+ *    1. Discovers via mDNS _smartghar._tcp (advertised by netmgr) and
+ *       reads the hub_id TXT record for stable identity.
+ *    2. Polls /api/v1/info and /api/v1/devices every 30 s for hub
+ *       metadata and sub-device state.
+ *    3. Subscribes to /api/v1/stream WS for ~3 s push snapshots.
+ *    4. PUTs /api/v1/devices/{id} to update config (e.g. vacancy_secs).
+ *    5. POSTs /api/v1/hub/identify to flash the status LED, and
+ *       /api/v1/hub/reboot to soft-reboot.
+ *
+ *  AmbiSense models itself as a hub with one virtual device of
+ *  kind "presence" — same coordinator logic the integration uses for
+ *  TankSync's "tank" devices. Adding DEVICE_KIND_PRESENCE = "presence"
+ *  to the integration's const.py is the only change needed there to
+ *  render full presence entities; without that PR, the integration
+ *  shows AmbiSense as a generic hub with diagnostic sensors.
  * ============================================================ */
-static esp_err_t handle_mesh_get(httpd_req_t *req) {
+
+/* Build the unique_id used in mDNS TXT and /api/v1/info. */
+static void make_hub_id(char *out, size_t max) {
+    uint8_t mac[6]; esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(out, max, "ambisense_%02x%02x%02x%02x%02x%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static esp_err_t handle_v1_info(httpd_req_t *req) {
     cJSON *r = cJSON_CreateObject();
-    cJSON_AddBoolToObject(r, "coordinator", mesh_is_coordinator());
-    cJSON_AddBoolToObject(r, "pairing", mesh_in_pairing());
-    cJSON_AddNumberToObject(r, "pairing_ms_left", mesh_pairing_remaining_ms());
-    static const char *FUSE_NAMES[] = {"most_recent","slave_first","master_first","zone_based"};
-    cJSON_AddStringToObject(r, "fusion", FUSE_NAMES[mesh_get_fusion()]);
-
-    /* Our own MAC — UI uses it to highlight "this device" in the peers
-     * card and to filter ourselves out of identify-target dropdowns. */
-    uint8_t mymac[6];
-    esp_read_mac(mymac, ESP_MAC_WIFI_STA);
-    char myms[18];
-    snprintf(myms, sizeof(myms), "%02x:%02x:%02x:%02x:%02x:%02x",
-             mymac[0], mymac[1], mymac[2], mymac[3], mymac[4], mymac[5]);
-    cJSON_AddStringToObject(r, "my_mac", myms);
-
-    mesh_peer_t peers[MESH_MAX_PEERS];
-    size_t n = mesh_peers_snapshot(peers, MESH_MAX_PEERS);
-    cJSON *arr = cJSON_AddArrayToObject(r, "peers");
-    for (size_t i = 0; i < n; ++i) {
-        cJSON *o = cJSON_CreateObject();
-        char macstr[18];
-        snprintf(macstr, sizeof(macstr), "%02x:%02x:%02x:%02x:%02x:%02x",
-                 peers[i].mac[0], peers[i].mac[1], peers[i].mac[2],
-                 peers[i].mac[3], peers[i].mac[4], peers[i].mac[5]);
-        cJSON_AddStringToObject(o, "mac", macstr);
-        cJSON_AddNumberToObject(o, "distance_cm", peers[i].distance_cm);
-        cJSON_AddNumberToObject(o, "direction", peers[i].direction);
-        cJSON_AddNumberToObject(o, "rssi", peers[i].rssi);
-        cJSON_AddBoolToObject (o, "healthy", peers[i].healthy);
-        cJSON_AddItemToArray(arr, o);
-    }
+    /* schema 1.1 added: topology + stream blocks. The smartghar HA
+     * integration v0.7.1+ reads these to (a) collapse standalone
+     * products into a single HA device and (b) connect to the WS push
+     * channel for real-time updates instead of falling back to 30s
+     * polling. v0.7.0 and older still work — they ignore the new
+     * fields and stay on polling. */
+    cJSON_AddStringToObject(r, "schema_version", "1.1");
+    cJSON_AddStringToObject(r, "manufacturer",   "SmartGhar");
+    cJSON_AddStringToObject(r, "product",        "ambisense");
+    cJSON_AddStringToObject(r, "model",          "AmbiSense v6");
+    /* topology=standalone — the C3 itself is the radar. No sub-devices
+     * in the physical sense; the integration merges presence entities
+     * onto the hub's HA device card. Future products that aggregate
+     * battery TX nodes (TankSync, PowerSync) will set "hub" instead. */
+    cJSON_AddStringToObject(r, "topology",       "standalone");
+    /* stream — tells the integration where to subscribe and what cadence
+     * to expect. frame_period_ms is self-declared so each product
+     * picks its own push rate (3s for AmbiSense; TankSync would emit
+     * snapshots only on TX-frame events). */
+    cJSON *stream = cJSON_AddObjectToObject(r, "stream");
+    cJSON_AddStringToObject(stream, "ws_path",         "/api/v1/stream");
+    cJSON_AddNumberToObject(stream, "frame_period_ms", 3000);
+    const esp_app_desc_t *app = esp_app_get_description();
+    cJSON_AddStringToObject(r, "fw_version", app ? app->version : "unknown");
+    char hub_id[40]; make_hub_id(hub_id, sizeof(hub_id));
+    cJSON_AddStringToObject(r, "hub_id",    hub_id);
+    cJSON_AddStringToObject(r, "unique_id", hub_id);  /* alias for older integration code */
+    char host[33] = {0}; netmgr_get_hostname(host, sizeof(host));
+    cJSON_AddStringToObject(r, "host", host);
+    /* hub_name — what the smartghar HA integration uses as the device
+     * registry "name" (see custom_components/smartghar/sensor.py
+     * SmartGharHubSensor.device_info). Without this, the integration
+     * falls back to "SmartGhar Hub (XXXXXX)" which is ugly. We use
+     * the same hostname-as-friendly-name convention TankSync does
+     * (e.g. "ambisense-f6dc"). */
+    cJSON_AddStringToObject(r, "hub_name", host);
+    char ip[24] = {0}; netmgr_get_ip(ip, sizeof(ip));
+    cJSON_AddStringToObject(r, "ip", ip);
+    cJSON_AddNumberToObject(r, "uptime_s",  (uint32_t)(esp_timer_get_time() / 1000000));
+    cJSON_AddNumberToObject(r, "wifi_rssi", netmgr_get_rssi());
+    cJSON_AddNumberToObject(r, "free_heap", (uint32_t)esp_get_free_heap_size());
+    cJSON *caps = cJSON_AddArrayToObject(r, "capabilities");
+    cJSON_AddItemToArray(caps, cJSON_CreateString("presence"));
+    cJSON_AddItemToArray(caps, cJSON_CreateString("distance"));
+    cJSON_AddItemToArray(caps, cJSON_CreateString("led_strip"));
     return send_json(req, r);
 }
 
-static esp_err_t handle_mesh_post(httpd_req_t *req) {
+/* Build a single "device" object — the AmbiSense radar + presence as
+ * a virtual sub-device of this hub. Kind = "presence" so the
+ * integration can dispatch on it. */
+static cJSON *build_presence_device(void) {
+    cJSON *d = cJSON_CreateObject();
+    cJSON_AddStringToObject(d, "kind", "presence");
+    cJSON_AddNumberToObject(d, "id",   0);
+    cJSON_AddStringToObject(d, "name", "Presence Sensor");
+
+    cJSON *st = cJSON_AddObjectToObject(d, "state");
+    presence_t pr; bool have = (presence_get(&pr) == ESP_OK);
+    cJSON_AddBoolToObject (st, "occupied",     have ? pr.occupied : false);
+    cJSON_AddNumberToObject(st, "target_count", have ? pr.target_count : 0);
+    cJSON_AddBoolToObject (st, "stationary",   have ? pr.stationary : false);
+    cJSON_AddNumberToObject(st, "nearest_cm",   have ? pr.nearest_cm : -1);
+    if (have && pr.ms_since_seen != UINT32_MAX) {
+        cJSON_AddNumberToObject(st, "seconds_since_seen", pr.ms_since_seen / 1000);
+    } else {
+        cJSON_AddNullToObject(st, "seconds_since_seen");
+    }
+    cJSON_AddNumberToObject(st, "rssi_dbm",  netmgr_get_rssi());
+    cJSON_AddStringToObject(st, "conn_state", "online");
+
+    cJSON *cfg = cJSON_AddObjectToObject(d, "config");
+    cJSON_AddNumberToObject(cfg, "vacancy_secs", presence_get_vacancy_timeout());
+    char rk[16] = {0}; settings_get_radar_kind(rk, sizeof(rk));
+    cJSON_AddStringToObject(cfg, "radar_kind", rk[0] ? rk : "ld2450");
+    return d;
+}
+
+static esp_err_t handle_v1_devices(httpd_req_t *req) {
+    cJSON *r = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(r, "devices");
+    cJSON_AddItemToArray(arr, build_presence_device());
+    return send_json(req, r);
+}
+
+/* PUT /api/v1/devices/{id} — config writes. AmbiSense has only
+ * device id 0 (presence). Accepts {config: {vacancy_secs: N, ...}}.
+ * Returns the updated device object so the integration can immediately
+ * reflect the new state without a separate GET. */
+static esp_err_t handle_v1_devices_put(httpd_req_t *req) {
     if (!gate_auth(req)) return ESP_OK;
+    /* Path is registered under /api/v1/devices/0 — id is fixed at 0
+     * since AmbiSense has only one virtual device. Future products
+     * with multiple sub-devices will dispatch on the path tail. */
     cJSON *j = read_body_json(req);
     if (!j) return send_err(req, 400, "bad json");
-    cJSON *fuse = cJSON_GetObjectItem(j, "fusion");
-    if (fuse && cJSON_IsString(fuse)) {
-        mesh_fusion_t mode = MESH_FUSE_MOST_RECENT;
-        if      (strcmp(fuse->valuestring, "slave_first")  == 0) mode = MESH_FUSE_SLAVE_FIRST;
-        else if (strcmp(fuse->valuestring, "master_first") == 0) mode = MESH_FUSE_MASTER_FIRST;
-        else if (strcmp(fuse->valuestring, "zone_based")   == 0) mode = MESH_FUSE_ZONE_BASED;
-        mesh_set_fusion(mode);
-    }
-    cJSON *pair = cJSON_GetObjectItem(j, "pair");
-    if (pair && cJSON_IsTrue(pair)) mesh_open_pairing();
-    cJSON_Delete(j);
-    cJSON *r = cJSON_CreateObject();
-    cJSON_AddBoolToObject(r, "ok", true);
-    cJSON_AddBoolToObject(r, "pairing", mesh_in_pairing());
-    cJSON_AddNumberToObject(r, "pairing_ms_left", mesh_pairing_remaining_ms());
-    return send_json(req, r);
-}
-
-/* /api/mesh/identify {mac:"aa:bb:..."} — unicast IDENTIFY so the named
- * peer blinks its LED for 5 s. Lets the user physically map MACs to
- * actual stair locations during topology setup. */
-static esp_err_t handle_mesh_identify(httpd_req_t *req) {
-    if (!gate_auth(req)) return ESP_OK;
-    cJSON *j = read_body_json(req);
-    if (!j) return send_err(req, 400, "bad json");
-    cJSON *mac = cJSON_GetObjectItem(j, "mac");
-    if (!mac || !cJSON_IsString(mac)) { cJSON_Delete(j); return send_err(req, 400, "mac required"); }
-    unsigned m[6];
-    if (sscanf(mac->valuestring, "%x:%x:%x:%x:%x:%x", &m[0],&m[1],&m[2],&m[3],&m[4],&m[5]) != 6) {
-        cJSON_Delete(j);
-        return send_err(req, 400, "bad mac format");
-    }
-    cJSON_Delete(j);
-    uint8_t target[6] = { (uint8_t)m[0], (uint8_t)m[1], (uint8_t)m[2],
-                          (uint8_t)m[3], (uint8_t)m[4], (uint8_t)m[5] };
-    esp_err_t err = mesh_identify(target);
-    if (err != ESP_OK) return send_err(req, 500, "send failed");
-    cJSON *r = cJSON_CreateObject();
-    cJSON_AddBoolToObject(r, "ok", true);
-    cJSON_AddStringToObject(r, "note", "peer should blink for 5 s");
-    return send_json(req, r);
-}
-
-/* ============================================================
- *  /api/topology
- * ============================================================ */
-static esp_err_t handle_topology_get(httpd_req_t *req) {
-    const topology_t *t = topology_get();
-    cJSON *r = cJSON_CreateObject();
-    static const char *KIND_NAMES[] = {"straight","l_shape","u_shape","custom"};
-    cJSON_AddStringToObject(r, "kind", KIND_NAMES[t->kind <= TOPO_CUSTOM ? t->kind : 0]);
-    cJSON_AddNumberToObject(r, "version", t->version);
-    cJSON_AddNumberToObject(r, "total_leds", t->total_leds);
-    cJSON *arr = cJSON_AddArrayToObject(r, "segments");
-    for (uint8_t i = 0; i < t->segment_count; ++i) {
-        cJSON *o = cJSON_CreateObject();
-        char macstr[18];
-        snprintf(macstr, sizeof(macstr), "%02x:%02x:%02x:%02x:%02x:%02x",
-                 t->segments[i].mac[0], t->segments[i].mac[1], t->segments[i].mac[2],
-                 t->segments[i].mac[3], t->segments[i].mac[4], t->segments[i].mac[5]);
-        cJSON_AddStringToObject(o, "mac", macstr);
-        cJSON_AddNumberToObject(o, "led_start",   t->segments[i].led_start);
-        cJSON_AddNumberToObject(o, "led_end",     t->segments[i].led_end);
-        cJSON_AddNumberToObject(o, "dist_min_cm", t->segments[i].dist_min_cm);
-        cJSON_AddNumberToObject(o, "dist_max_cm", t->segments[i].dist_max_cm);
-        cJSON_AddBoolToObject (o, "reverse",      t->segments[i].reverse);
-        cJSON_AddItemToArray(arr, o);
-    }
-    return send_json(req, r);
-}
-
-static esp_err_t handle_topology_post(httpd_req_t *req) {
-    if (!gate_auth(req)) return ESP_OK;
-    cJSON *j = read_body_json(req);
-    if (!j) return send_err(req, 400, "bad json");
-
-    topology_t t = *topology_get();
-    cJSON *kind = cJSON_GetObjectItem(j, "kind");
-    if (kind && cJSON_IsString(kind)) {
-        if      (strcmp(kind->valuestring, "straight") == 0) t.kind = TOPO_STRAIGHT;
-        else if (strcmp(kind->valuestring, "l_shape")  == 0) t.kind = TOPO_L_SHAPE;
-        else if (strcmp(kind->valuestring, "u_shape")  == 0) t.kind = TOPO_U_SHAPE;
-        else if (strcmp(kind->valuestring, "custom")   == 0) t.kind = TOPO_CUSTOM;
-    }
-    cJSON *total = cJSON_GetObjectItem(j, "total_leds");
-    if (total && cJSON_IsNumber(total)) t.total_leds = (uint16_t)total->valueint;
-    cJSON *segs = cJSON_GetObjectItem(j, "segments");
-    if (segs && cJSON_IsArray(segs)) {
-        int n = cJSON_GetArraySize(segs);
-        if (n > TOPO_MAX_SEGMENTS) n = TOPO_MAX_SEGMENTS;
-        t.segment_count = (uint8_t)n;
-        for (int i = 0; i < n; ++i) {
-            cJSON *s = cJSON_GetArrayItem(segs, i);
-            if (!s) continue;
-            cJSON *mac = cJSON_GetObjectItem(s, "mac");
-            if (mac && cJSON_IsString(mac)) {
-                unsigned m[6];
-                if (sscanf(mac->valuestring, "%x:%x:%x:%x:%x:%x", &m[0],&m[1],&m[2],&m[3],&m[4],&m[5]) == 6) {
-                    for (int k = 0; k < 6; ++k) t.segments[i].mac[k] = (uint8_t)m[k];
-                }
-            }
-            cJSON *v;
-            v = cJSON_GetObjectItem(s, "led_start");   if (v && cJSON_IsNumber(v)) t.segments[i].led_start   = v->valueint;
-            v = cJSON_GetObjectItem(s, "led_end");     if (v && cJSON_IsNumber(v)) t.segments[i].led_end     = v->valueint;
-            v = cJSON_GetObjectItem(s, "dist_min_cm"); if (v && cJSON_IsNumber(v)) t.segments[i].dist_min_cm = v->valueint;
-            v = cJSON_GetObjectItem(s, "dist_max_cm"); if (v && cJSON_IsNumber(v)) t.segments[i].dist_max_cm = v->valueint;
-            v = cJSON_GetObjectItem(s, "reverse");     if (v) t.segments[i].reverse = cJSON_IsTrue(v) ? 1 : 0;
+    int updated = 0;
+    cJSON *cfg = cJSON_GetObjectItem(j, "config");
+    if (cfg && cJSON_IsObject(cfg)) {
+        cJSON *v = cJSON_GetObjectItem(cfg, "vacancy_secs");
+        if (v && cJSON_IsNumber(v)) {
+            if (presence_set_vacancy_timeout((uint32_t)v->valueint) == ESP_OK) updated++;
+        }
+        v = cJSON_GetObjectItem(cfg, "radar_kind");
+        if (v && cJSON_IsString(v)) {
+            settings_set_radar_kind(v->valuestring); updated++;
+            /* radar_kind requires a reboot to take effect; integration
+             * is expected to call /api/v1/hub/reboot afterward. */
         }
     }
     cJSON_Delete(j);
-    esp_err_t err = topology_set(&t, true);
-    if (err != ESP_OK) return send_err(req, 400, "invalid topology");
-    mesh_gossip_topology();
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", true);
-    cJSON_AddNumberToObject(r, "version", topology_get()->version);
+    cJSON_AddNumberToObject(r, "updated", updated);
+    cJSON_AddItemToObject(r, "device", build_presence_device());
     return send_json(req, r);
+}
+
+static esp_err_t handle_v1_hub_identify(httpd_req_t *req) {
+    if (!gate_auth(req)) return ESP_OK;
+    /* Flash the onboard status LED for ~3 s using a one-shot OTA-pattern
+     * burst — fast 5 Hz blink that's visually distinct from the slow
+     * AP/STA heartbeat. The status_led module's oneshot mechanism
+     * automatically reverts to the prior pattern when done. */
+    status_led_oneshot(STATUS_LED_OTA, 3000);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "ok", true);
+    return send_json(req, r);
+}
+
+static esp_err_t handle_v1_hub_reboot(httpd_req_t *req) {
+    /* Alias to the existing /api/reboot. Kept as a separate route so
+     * the smartghar contract path stays stable across firmware
+     * refactors of the legacy /api/(any) tree. */
+    return handle_reboot(req);
 }
 
 /* ============================================================
@@ -1022,11 +1067,32 @@ static void ws_broadcast_task(void *arg) {
         snap.rssi = netmgr_get_rssi();
         xSemaphoreGive(s_web.lock);
 
-        char json[200];
+        /* Pull presence inline so WS clients see distance + occupancy
+         * coherently — important for HA-style consumers that don't want
+         * to merge two timestamps. */
+        presence_t p;
+        if (presence_get(&p) == ESP_OK) {
+            snap.pres_occupied      = p.occupied;
+            snap.pres_count         = p.target_count;
+            snap.pres_stationary    = p.stationary;
+            snap.pres_nearest_cm    = p.nearest_cm;
+            snap.pres_ms_since_seen = p.ms_since_seen;
+        }
+
+        char json[280];
         int n = snprintf(json, sizeof(json),
-            "{\"distance\":%d,\"raw\":%d,\"direction\":%d,\"rssi\":%d,\"heap\":%" PRIu32 ",\"uptime\":%" PRIu32 ",\"peers\":%u,\"healthy\":%u}",
+            "{\"distance\":%d,\"raw\":%d,\"direction\":%d,\"rssi\":%d,"
+            "\"heap\":%" PRIu32 ",\"uptime\":%" PRIu32 ","
+            "\"occupied\":%s,\"count\":%u,\"stationary\":%s,"
+            "\"nearest_cm\":%d,\"seconds_since_seen\":%" PRIu32 "}",
             snap.distance_cm, snap.raw_cm, snap.direction, snap.rssi,
-            snap.free_heap, snap.uptime_s, snap.peer_count, snap.peer_healthy);
+            snap.free_heap, snap.uptime_s,
+            snap.pres_occupied ? "true" : "false",
+            (unsigned)snap.pres_count,
+            snap.pres_stationary ? "true" : "false",
+            snap.pres_nearest_cm,
+            snap.pres_ms_since_seen == UINT32_MAX ? UINT32_MAX
+                                                  : snap.pres_ms_since_seen / 1000);
 
         httpd_ws_frame_t f = {
             .final = true, .fragmented = false,
@@ -1051,6 +1117,117 @@ void webui_publish_live(const webui_live_t *snap) {
     xSemaphoreTake(s_web.lock, portMAX_DELAY);
     s_web.latest = *snap;
     xSemaphoreGive(s_web.lock);
+}
+
+/* ============================================================
+ *  /api/v1/stream — smartghar-protocol WS push channel
+ *
+ *  Consumed by the smartghar Home Assistant integration v0.7.1+.
+ *  Distinct from /api/live (which feeds the PWA dashboard at 20 Hz)
+ *  because the integration wants protocol-shaped JSON frames at a
+ *  slower cadence and the PWA wants raw live deltas.
+ *
+ *  Frames:
+ *    {"kind":"hello","schema_version":"1.1","hub_id":"..."}
+ *      — sent once on connect.
+ *    {"kind":"snapshot","hub":{...dynamic...},"devices":[...]}
+ *      — emitted every 3 s by v1_stream_broadcast_task.
+ *
+ *  Static fields (hub_id, fw_version, product, topology, ota.current)
+ *  are not re-sent on every snapshot; the integration learns them
+ *  once via /api/v1/info polling and merges them with WS deltas.
+ *
+ *  The "event" frame kind is reserved for future event-driven push
+ *  (lock-opened, gas-leak) — not emitted from AmbiSense yet.
+ * ============================================================ */
+static esp_err_t handle_v1_stream(httpd_req_t *req) {
+    if (req->method != HTTP_GET) return ESP_OK;
+    /* Handshake. Save fd, send hello frame. */
+    int fd = httpd_req_to_sockfd(req);
+    xSemaphoreTake(s_web.lock, portMAX_DELAY);
+    bool seated = false;
+    for (int i = 0; i < MAX_V1_WS_CLIENTS; ++i) {
+        if (s_web.v1_ws_fds[i] == 0) {
+            s_web.v1_ws_fds[i] = fd;
+            seated = true;
+            break;
+        }
+    }
+    xSemaphoreGive(s_web.lock);
+    if (!seated) {
+        ESP_LOGW(TAG, "v1/stream: no slot for fd=%d (max %d)", fd, MAX_V1_WS_CLIENTS);
+        return ESP_OK;
+    }
+
+    char hub_id[40]; make_hub_id(hub_id, sizeof(hub_id));
+    char hello[160];
+    int n = snprintf(hello, sizeof(hello),
+        "{\"kind\":\"hello\",\"schema_version\":\"1.1\",\"hub_id\":\"%s\"}",
+        hub_id);
+    httpd_ws_frame_t f = {
+        .final = true, .fragmented = false,
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t *)hello, .len = n,
+    };
+    httpd_ws_send_frame_async(s_web.srv, fd, &f);
+    ESP_LOGI(TAG, "v1/stream client connected, fd=%d", fd);
+    return ESP_OK;
+}
+
+/* Emit one snapshot frame to every /api/v1/stream subscriber. */
+static void v1_stream_broadcast_task(void *arg) {
+    (void)arg;
+    char hub_id[40]; make_hub_id(hub_id, sizeof(hub_id));
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+
+        /* Skip the JSON build entirely if no one's listening — saves ~3 KB
+         * stack churn + cJSON allocations on idle hubs. */
+        bool any = false;
+        xSemaphoreTake(s_web.lock, portMAX_DELAY);
+        for (int i = 0; i < MAX_V1_WS_CLIENTS; ++i) {
+            if (s_web.v1_ws_fds[i] != 0) { any = true; break; }
+        }
+        xSemaphoreGive(s_web.lock);
+        if (!any) continue;
+
+        /* Build snapshot JSON. Mirrors handle_v1_devices' shape so the
+         * integration's snapshot-merge logic in coordinator.py treats
+         * WS-pushed devices identically to polled devices. */
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "kind", "snapshot");
+
+        cJSON *hub = cJSON_AddObjectToObject(root, "hub");
+        cJSON_AddNumberToObject(hub, "uptime_s",  (uint32_t)(esp_timer_get_time() / 1000000));
+        cJSON_AddNumberToObject(hub, "wifi_rssi", netmgr_get_rssi());
+
+        cJSON *devs = cJSON_AddArrayToObject(root, "devices");
+        cJSON_AddItemToArray(devs, build_presence_device());
+
+        char *json = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (!json) continue;
+        size_t len = strlen(json);
+
+        httpd_ws_frame_t f = {
+            .final = true, .fragmented = false,
+            .type = HTTPD_WS_TYPE_TEXT,
+            .payload = (uint8_t *)json, .len = len,
+        };
+        xSemaphoreTake(s_web.lock, portMAX_DELAY);
+        for (int i = 0; i < MAX_V1_WS_CLIENTS; ++i) {
+            if (s_web.v1_ws_fds[i] == 0) continue;
+            esp_err_t err = httpd_ws_send_frame_async(
+                s_web.srv, s_web.v1_ws_fds[i], &f);
+            if (err != ESP_OK) {
+                /* Client gone — drop fd. Integration's coordinator
+                 * will reconnect with backoff. */
+                s_web.v1_ws_fds[i] = 0;
+            }
+        }
+        xSemaphoreGive(s_web.lock);
+        free(json);
+    }
 }
 
 /* ============================================================
@@ -1115,11 +1292,13 @@ static const httpd_uri_t k_routes[] = {
     { "/api/settings",                   HTTP_GET,  handle_settings_get,     NULL },
     { "/api/settings",                   HTTP_POST, handle_settings_post,    NULL },
     { "/api/distance",                   HTTP_GET,  handle_distance,         NULL },
-    { "/api/mesh",                       HTTP_GET,  handle_mesh_get,         NULL },
-    { "/api/mesh",                       HTTP_POST, handle_mesh_post,        NULL },
-    { "/api/mesh/identify",              HTTP_POST, handle_mesh_identify,    NULL },
-    { "/api/topology",                   HTTP_GET,  handle_topology_get,     NULL },
-    { "/api/topology",                   HTTP_POST, handle_topology_post,    NULL },
+    { "/api/presence",                   HTTP_GET,  handle_presence_get,     NULL },
+    /* smartghar contract — /api/v1 — consumed by the smartghar HA integration */
+    { "/api/v1/info",                    HTTP_GET,  handle_v1_info,          NULL },
+    { "/api/v1/devices",                 HTTP_GET,  handle_v1_devices,       NULL },
+    { "/api/v1/devices/0",               HTTP_PUT,  handle_v1_devices_put,   NULL },
+    { "/api/v1/hub/identify",            HTTP_POST, handle_v1_hub_identify,  NULL },
+    { "/api/v1/hub/reboot",              HTTP_POST, handle_v1_hub_reboot,    NULL },
     { "/api/ota",                        HTTP_POST, handle_ota,              NULL },
 };
 
@@ -1129,7 +1308,7 @@ esp_err_t webui_init(void) {
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 48;   /* was 32 — overflowed at 33 once mesh/topology/factory_reset/ping/system routes were added; the /api/live WS handler stopped registering and the dashboard could no longer get live data */
+    cfg.max_uri_handlers = 48;   /* generous headroom — IDF default of 8 is far too low for our route count, and an exhausted handler table silently drops late-registered routes (e.g. the /api/live WS) instead of erroring */
     cfg.max_open_sockets = 7;
     cfg.stack_size = 8192;
     cfg.recv_wait_timeout = 10;
@@ -1142,7 +1321,7 @@ esp_err_t webui_init(void) {
         httpd_register_uri_handler(s_web.srv, &k_routes[i]);
     }
 
-    /* Live-data WS */
+    /* Live-data WS — drives the PWA dashboard at 20 Hz. */
     static const httpd_uri_t ws_route = {
         .uri = "/api/live", .method = HTTP_GET,
         .handler = handle_ws, .user_ctx = NULL,
@@ -1150,9 +1329,20 @@ esp_err_t webui_init(void) {
     };
     httpd_register_uri_handler(s_web.srv, &ws_route);
 
-    xTaskCreate(ws_broadcast_task, "ws_bcast", 4096, NULL, 3, NULL);
+    /* smartghar protocol WS — consumed by the HA integration v0.7.1+
+     * for real-time presence updates. 3 s push cadence, separate fd
+     * pool from /api/live so PWA + HA can run side-by-side. */
+    static const httpd_uri_t v1_stream_route = {
+        .uri = "/api/v1/stream", .method = HTTP_GET,
+        .handler = handle_v1_stream, .user_ctx = NULL,
+        .is_websocket = true, .handle_ws_control_frames = false,
+    };
+    httpd_register_uri_handler(s_web.srv, &v1_stream_route);
 
-    ESP_LOGI(TAG, "Web server listening on :80 (%zu routes + ws)",
-             sizeof(k_routes)/sizeof(k_routes[0]) + 1);
+    xTaskCreate(ws_broadcast_task,        "ws_bcast",      4096, NULL, 3, NULL);
+    xTaskCreate(v1_stream_broadcast_task, "v1_strm_bcast", 4096, NULL, 3, NULL);
+
+    ESP_LOGI(TAG, "Web server listening on :80 (%zu routes + 2 ws)",
+             sizeof(k_routes)/sizeof(k_routes[0]));
     return ESP_OK;
 }
