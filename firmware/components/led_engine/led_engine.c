@@ -270,6 +270,29 @@ static void mode_motion_particles(int start) {
 
 /* ------ main render task ------------------------------------------- */
 
+static void render_frame(void) {
+    target_t t = {0};
+    motion_get(&t);
+    int start = distance_to_start_led(t.distance_cm);
+
+    switch (s_led.mode) {
+        case LED_MODE_STANDARD:     mode_standard(start);     break;
+        case LED_MODE_RAINBOW:      mode_rainbow();           break;
+        case LED_MODE_COLOR_WAVE:       mode_color_wave();        break;
+        case LED_MODE_BREATHING:    mode_breathing();         break;
+        case LED_MODE_SOLID:        mode_solid();         break;
+        case LED_MODE_COMET:        mode_comet(start);        break;
+        case LED_MODE_PULSE:        mode_pulse(start);        break;
+        case LED_MODE_FIRE:         mode_fire();          break;
+        case LED_MODE_THEATER_CHASE:    mode_theater_chase();     break;
+        case LED_MODE_DUAL_SCAN:    mode_dual_scan(start);    break;
+        case LED_MODE_MOTION_PARTICLES: mode_motion_particles(start); break;
+        default:             mode_standard(start);     break;
+    }
+
+    s_led.step++;
+}
+
 static void render_task(void *arg) {
     (void)arg;
     while (1) {
@@ -285,27 +308,8 @@ static void render_task(void *arg) {
             continue;
         }
 
-        target_t t = {0};
-        motion_get(&t);
-        int start = distance_to_start_led(t.distance_cm);
-
-        switch (s_led.mode) {
-            case LED_MODE_STANDARD:         mode_standard(start);         break;
-            case LED_MODE_RAINBOW:          mode_rainbow();               break;
-            case LED_MODE_COLOR_WAVE:       mode_color_wave();            break;
-            case LED_MODE_BREATHING:        mode_breathing();             break;
-            case LED_MODE_SOLID:            mode_solid();                 break;
-            case LED_MODE_COMET:            mode_comet(start);            break;
-            case LED_MODE_PULSE:            mode_pulse(start);            break;
-            case LED_MODE_FIRE:             mode_fire();                  break;
-            case LED_MODE_THEATER_CHASE:    mode_theater_chase();         break;
-            case LED_MODE_DUAL_SCAN:        mode_dual_scan(start);        break;
-            case LED_MODE_MOTION_PARTICLES: mode_motion_particles(start); break;
-            default:                         mode_standard(start);         break;
-        }
-
+        render_frame();
         led_strip_refresh(s_led.strip);
-        s_led.step++;
         vTaskDelay(pdMS_TO_TICKS(16));  /* ~60 Hz */
     }
 }
@@ -398,3 +402,19 @@ esp_err_t led_engine_init(uint8_t data_gpio) {
     xTaskCreate(render_task, "led_render", 6144, NULL, 4, NULL);
     return ESP_OK;
 }
+
+#ifdef AMBISENSE_HOST_REPLAY
+void replay_led_reset(void) {
+    free(s_led.fire_heat); free(s_led.prev_frame);
+    memset(&s_led, 0, sizeof(s_led));
+    load_settings_from_nvs();
+    s_led.fire_heat = calloc(s_led.count, 1);
+    s_led.prev_frame = calloc(s_led.count, sizeof(rgb_t));
+}
+void replay_led_render(void) {
+    uint8_t enabled = 1;
+    settings_get_u8("sys", "enabled", &enabled);
+    if (enabled) render_frame();
+    else clear_all();
+}
+#endif
