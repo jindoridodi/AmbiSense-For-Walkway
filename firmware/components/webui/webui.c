@@ -25,6 +25,7 @@
 #include "ota.h"
 #include "board.h"
 #include "led_engine.h"
+#include "build_identity.h"
 #include "radar.h"
 #include "motion.h"
 #include "presence.h"
@@ -327,6 +328,8 @@ static esp_err_t handle_version(httpd_req_t *req) {
     cJSON *r = cJSON_CreateObject();
 
     cJSON_AddStringToObject(r, "version", app->version);
+    cJSON_AddStringToObject(r, "source_commit", AMBISENSE_BUILD_COMMIT);
+    cJSON_AddStringToObject(r, "source_dirty", AMBISENSE_BUILD_DIRTY);
     cJSON_AddStringToObject(r, "idf_version", app->idf_ver);
     cJSON_AddStringToObject(r, "build_date", app->date);
     cJSON_AddStringToObject(r, "build_time", app->time);
@@ -916,6 +919,8 @@ static esp_err_t handle_v1_info(httpd_req_t *req) {
     cJSON_AddNumberToObject(stream, "frame_period_ms", 3000);
     const esp_app_desc_t *app = esp_app_get_description();
     cJSON_AddStringToObject(r, "fw_version", app ? app->version : "unknown");
+    cJSON_AddStringToObject(r, "source_commit", AMBISENSE_BUILD_COMMIT);
+    cJSON_AddStringToObject(r, "source_dirty", AMBISENSE_BUILD_DIRTY);
     char hub_id[40]; make_hub_id(hub_id, sizeof(hub_id));
     cJSON_AddStringToObject(r, "hub_id",    hub_id);
     cJSON_AddStringToObject(r, "unique_id", hub_id);  /* alias for older integration code */

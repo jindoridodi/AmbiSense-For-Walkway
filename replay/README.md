@@ -5,12 +5,16 @@ engine source with host substitutes for ESP services. `make -C replay test`
 runs the protocol and input-to-RGB checks. A C compiler and make are required.
 The program prints the Git HEAD and whether the working tree was dirty **when
 built** to stderr; rebuild after any change. A dirty build cannot be identified
-by its commit alone. Firmware build identity is not yet exposed.
+by its commit alone. Firmware builds report `source_commit` and `source_dirty`
+through `/api/version` and `/api/v1/info`; `unknown` means Git was unavailable
+at build time. A dirty build still needs its changes preserved to be reproducible.
 
 Events on stdin have nondecreasing microsecond timestamps:
 
 - `I <time> <hex>` supplies one UART read as hex bytes. The baseline radar
   loop calls the parser once per read and retains the unconsumed bytes.
+- `P <time>` runs another radar loop iteration with no new UART bytes. Use it
+  when a read contains more than one frame; the firmware parses once per loop.
 - `R <time>` renders once. Output is the timestamp followed by one `RRGGBB`
   value per LED, in physical chain index order, after brightness scaling.
 
@@ -27,7 +31,7 @@ This models one deterministic ordering of radar and render events, not the
 asynchronous device task scheduler. Only standard mode is supported; other
 effects are not validated for replay. The host substitutes assume settings are
 valid values of the same types as NVS. The firmware's actual settings, timing,
-source identity and LED output must still be captured independently for a
+LED output must still be captured independently for a
 comparison. No ESP build or physical hardware validation is implied.
 
 The baseline parser discards all but three bytes of some incomplete reads;

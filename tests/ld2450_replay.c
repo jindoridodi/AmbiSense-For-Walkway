@@ -32,4 +32,8 @@ int main(void) {
     assert(radar_ld2450_parse_at(&state, absent, sizeof absent, &frame, 3000) == 30);
     assert(!frame.present && frame.target_count == 0 && frame.distance_cm == 0);
     assert(frame.direction == -1 && frame.ts_us == 3000);
+    uint8_t distant[30] = {0xaa, 0xff, 3, 0, 0, 0, 0x88, 0x93, 0, 0, 1, 0};
+    distant[28] = 0x55; distant[29] = 0xcc;
+    assert(radar_ld2450_parse_at(&state, distant, sizeof distant, &frame, 4000) == 30);
+    assert(frame.targets[0].y_cm == 500 && frame.distance_cm == 255);
 }

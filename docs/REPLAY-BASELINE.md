@@ -20,6 +20,9 @@ This document describes that baseline, not a completed replay implementation.
   from timestamps and configuration alone without controlling random state.
 - The baseline simulator supplies scalar distances, not LD2450 protocol
   frames. It cannot validate coordinate decoding or quantization.
+- The LD2450 integer square root starts at `1 << 14`. For squared distances
+  above its supported range it can underreport the radial distance (for
+  example, 500 cm on one axis produces 255 cm). This is a baseline defect.
 
 The host/ESP shared build, explicit replay state and clock, final RGB capture,
 protocol fixtures, source identity reporting, and device comparison are still

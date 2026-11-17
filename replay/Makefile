@@ -9,9 +9,10 @@ build_identity.h: FORCE
 	@printf '#define BUILD_COMMIT "%s"\n#define BUILD_DIRTY "%s"\n' "$$(git rev-parse HEAD)" "$$(if test -n "$$(git status --porcelain)"; then echo yes; else echo no; fi)" > $@
 ambisense-replay: main.c $(SOURCES) build_identity.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) main.c $(SOURCES) $(LDLIBS) -o $@
-test: ../tests/replay_integration.c $(SOURCES)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $^ $(LDLIBS) -o /tmp/ambisense-replay-test
+test: ambisense-replay ../tests/replay_integration.c $(SOURCES)
+	$(CC) $(CPPFLAGS) $(CFLAGS) ../tests/replay_integration.c $(SOURCES) $(LDLIBS) -o /tmp/ambisense-replay-test
 	/tmp/ambisense-replay-test
+	python3 ../tests/replay_cli.py
 	$(CC) -std=c11 -Wall -Wextra -Werror -I../tests/stubs -I../firmware/components/radar/include ../tests/ld2450_replay.c ../firmware/components/radar/radar_ld2450.c -o /tmp/ambisense-ld2450-test
 	/tmp/ambisense-ld2450-test
 clean:

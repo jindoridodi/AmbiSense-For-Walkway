@@ -27,17 +27,19 @@ int main(void) {
             fprintf(stderr, "invalid or out-of-order event: %s", line); return 1;
         }
         previous = now;
-        if (kind == 'I') {
-            uint8_t bytes[512]; size_t n = strlen(hex);
-            if (!n || n % 2 || n / 2 > sizeof bytes) { fprintf(stderr, "invalid input bytes\n"); return 1; }
-            for (size_t i = 0; i < n / 2; i++) {
-                unsigned value; char part[3] = {hex[2*i], hex[2*i+1], 0};
-                char *end; value = (unsigned)strtoul(part, &end, 16);
-                if (*end || end != part + 2) { fprintf(stderr, "invalid input bytes\n"); return 1; }
-                bytes[i] = (uint8_t)value;
+        if (kind == 'I' || (kind == 'P' && !hex[0])) {
+            if (kind == 'I') {
+                uint8_t bytes[512]; size_t n = strlen(hex);
+                if (!n || n % 2 || n / 2 > sizeof bytes) { fprintf(stderr, "invalid input bytes\n"); return 1; }
+                for (size_t i = 0; i < n / 2; i++) {
+                    unsigned value; char part[3] = {hex[2*i], hex[2*i+1], 0};
+                    char *end; value = (unsigned)strtoul(part, &end, 16);
+                    if (*end || end != part + 2) { fprintf(stderr, "invalid input bytes\n"); return 1; }
+                    bytes[i] = (uint8_t)value;
+                }
+                if (held_len + n / 2 > sizeof held) { fprintf(stderr, "input buffer overflow\n"); return 1; }
+                memcpy(held + held_len, bytes, n / 2); held_len += n / 2;
             }
-            if (held_len + n / 2 > sizeof held) { fprintf(stderr, "input buffer overflow\n"); return 1; }
-            memcpy(held + held_len, bytes, n / 2); held_len += n / 2;
             radar_frame_t frame = {0};
             size_t used = radar_ld2450_parse_at(&parser, held, held_len, &frame, now);
             if (used) {

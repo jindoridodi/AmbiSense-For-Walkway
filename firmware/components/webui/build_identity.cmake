@@ -1,0 +1,25 @@
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${REPO_DIR}"
+    OUTPUT_VARIABLE commit OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE git_result
+    ERROR_QUIET)
+if(NOT git_result EQUAL 0)
+    set(commit "unknown")
+    set(dirty "unknown")
+else()
+    execute_process(COMMAND git status --porcelain WORKING_DIRECTORY "${REPO_DIR}"
+        OUTPUT_VARIABLE changes OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE status_result
+        ERROR_QUIET)
+    if(NOT status_result EQUAL 0)
+        set(dirty "unknown")
+    elseif(changes STREQUAL "")
+        set(dirty "no")
+    else()
+        set(dirty "yes")
+    endif()
+endif()
+set(contents "#define AMBISENSE_BUILD_COMMIT \"${commit}\"\n#define AMBISENSE_BUILD_DIRTY \"${dirty}\"\n")
+if(EXISTS "${OUTPUT_FILE}")
+    file(READ "${OUTPUT_FILE}" previous)
+endif()
+if(NOT "${contents}" STREQUAL "${previous}")
+    file(WRITE "${OUTPUT_FILE}" "${contents}")
+endif()
