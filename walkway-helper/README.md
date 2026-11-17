@@ -1,0 +1,9 @@
+# Straight walkway offline helper
+
+Run `python3 walkway-helper/helper.py` from this checkout. It needs Python 3 with Tk, `make`, and a C compiler; it builds a local shared library from the firmware LD2450 parser and walkway code. Run `make -C walkway-helper test` for its checks. Linux and macOS desktop environments are supported; if Python lacks Tk, install a Python distribution that includes it. No ESP or network is needed.
+
+Edit the version 1 settings, enter one synthetic radar-relative target in signed millimeters, then select Preview. The helper encodes an LD2450 frame and calls the production parser, validator, projection and renderer. The parser quantizes to whole centimeters. The diagram shows the physical progress of each side and the list gives every actual chain index and RGB value. Save JSON writes the same version 1 object used by the device `/api/walkway` endpoint; Open validates it before editing. A saved file is a proposal: loading it into firmware requires posting it to that endpoint and restarting. The helper does not communicate with a device.
+
+The displayed source commit and dirty status identify the local source used to build the preview; match it to the firmware build before comparison. A dirty checkout cannot identify an exact firmware build by commit alone. Side lengths, positions and all dimensions are centimeters, radar angle is degrees, and offsets are zero-based chain indexes. See the firmware walkway documentation for its coordinate, footprint, and endpoint conventions.
+
+Only one straight segment and a single synthetic target are shown. Turns, multi-person tracking, target-loss hold/fade, other effects and device comparison are unsupported. Predicted coverage, software output, physical wiring and radar mounting are not hardware validated. Disabled configurations can be previewed as if enabled; the device preserves legacy behavior when disabled.
