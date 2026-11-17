@@ -2,7 +2,7 @@
 
 Issue #2 starts from upstream `v6.2.0-alpha.5` (`6f988b3`), merged in
 `6f0f542`. Both commits have tree `026d2f782aec4aab90a24a277e6ea123d5c2f648`.
-This document describes that baseline, not a completed replay implementation.
+This document describes the original baseline, not current behavior. The LD2450 stream now retains incomplete frames and does not publish discarded malformed bytes; see replay/README.md.
 
 - The LD2450 parser decodes signed millimetres and truncates coordinates to
   centimetres. It selects the first nonempty target's radial distance for

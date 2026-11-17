@@ -41,6 +41,17 @@ int main(void) {
             }
         }
     }
+    replay_walkway.config.side[0].count = 1;
+    replay_walkway.config.side[0].reversed = false;
+    replay_led_reset();
+    for (int y = 0; y <= 100; y += 100) {
+        int mm = y * 10;
+        input[6] = mm & 255; input[7] = 0x80 | (mm >> 8);
+        assert(radar_ld2450_parse_at(&parser, input, sizeof input, &replay_radar, replay_now) == 30);
+        replay_led_render();
+        assert(replay_rgb[0][0] == 80);
+    }
+    replay_walkway.config.side[0].count = 6;
     replay_radar.targets[0].x_cm = 31; replay_led_render();
     for (int i = 0; i < 17; ++i) assert(!replay_rgb[i][0]);
     replay_walkway.config.side[1].offset = 5;

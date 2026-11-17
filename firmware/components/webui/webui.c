@@ -840,7 +840,8 @@ static esp_err_t handle_walkway_get(httpd_req_t *req) {
     if (!gate_auth(req)) return ESP_OK;
     walkway_saved_t saved = {0}; size_t len = sizeof saved;
     esp_err_t err = settings_get_blob("walkway", "config", &saved, &len);
-    if (err != ESP_OK) return send_err(req, 404, "walkway configuration not found");
+    if (err == ESP_ERR_NVS_NOT_FOUND) return send_err(req, 404, "walkway configuration not found");
+    if (err != ESP_OK) return send_err(req, 500, "cannot read walkway configuration; reconfigure walkway");
     if (len != sizeof saved || saved.version != WALKWAY_CONFIG_VERSION || saved.enabled > 1 || walkway_validate(&saved.config))
         return send_err(req, 500, "incompatible walkway configuration");
     return send_json(req, walkway_json(&saved));

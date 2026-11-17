@@ -49,7 +49,7 @@ bool walkway_render(const walkway_config_t *c, const radar_frame_t *f,
         for (int s = 0; s < 2; ++s) {
             const walkway_side_t *side = &c->side[s];
             for (unsigned i = 0; i < side->count; ++i) {
-                float p = side->count == 1 ? 0 : (float)i / (side->count - 1);
+                float p = side->count == 1 ? 0.5f : (float)i / (side->count - 1);
                 float half_cell = side->count == 1 ? c->length_cm / 2 : c->length_cm / (2 * (side->count - 1));
                 if (fabsf(p * c->length_cm - y) > c->footprint_cm / 2 + half_cell) continue;
                 unsigned index = side->offset + (side->reversed ? side->count - 1 - i : i);

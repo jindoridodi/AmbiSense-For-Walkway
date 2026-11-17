@@ -51,6 +51,9 @@ typedef struct {
 
 typedef struct { int16_t last_distance_cm; } radar_ld2450_state_t;
 
+/* Discard consumed bytes and report whether parsing produced a frame. */
+bool radar_stream_consume(uint8_t *buf, size_t *held, size_t consumed, const radar_frame_t *frame);
+
 size_t radar_ld2450_parse_at(radar_ld2450_state_t *state, const uint8_t *buf,
                             size_t len, radar_frame_t *out, uint64_t ts_us);
 

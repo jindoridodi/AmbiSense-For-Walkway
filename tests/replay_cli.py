@@ -46,3 +46,12 @@ quantized = subprocess.run(
 assert quantized.stdout == (
     "1000 000000 000000 000000 505050 505050 000000 000000 000000 000000 000000\n"
 )
+
+# A fragment and malformed packet must not replace the last valid target.
+fragmented = subprocess.run(
+    ["./ambisense-replay"],
+    input=f"I 1000 {target}\nR 1000\nI 2000 {malformed}\nR 2000\nI 3000 {target[:20]}\nR 3000\nI 4000 {target[20:]}\nR 4000\n",
+    text=True, env=config, capture_output=True, check=True,
+)
+lines = fragmented.stdout.splitlines()
+assert len(lines) == 4 and all(line.split()[1:] == lines[0].split()[1:] for line in lines)

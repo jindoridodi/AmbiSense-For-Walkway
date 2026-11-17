@@ -5,6 +5,9 @@
 #include <math.h>
 
 #include "esp_log.h"
+#ifndef AMBISENSE_HOST_REPLAY
+#include "nvs.h"
+#endif
 #include "esp_timer.h"
 #include "led_strip.h"
 #include "freertos/FreeRTOS.h"
@@ -278,8 +281,9 @@ static void render_frame(void) {
     if (s_led.walkway_active) {
         static uint8_t rgb[MAX_LEDS][3];
         radar_frame_t frame = {0};
+        esp_err_t peek_result = radar_peek(&frame);
         uint64_t now = (uint64_t)esp_timer_get_time();
-        if (radar_peek(&frame) != ESP_OK || frame.ts_us > now || now - frame.ts_us > 250000) memset(&frame, 0, sizeof frame);
+        if (peek_result != ESP_OK || frame.ts_us > now || now - frame.ts_us > 250000) memset(&frame, 0, sizeof frame);
         walkway_render(&s_led.walkway.config, &frame, rgb, MAX_LEDS);
         for (int i = 0; i < s_led.count; ++i)
             led_strip_set_pixel(s_led.strip, i, rgb[i][0], rgb[i][1], rgb[i][2]);
@@ -339,7 +343,12 @@ static void load_settings_from_nvs(bool boot) {
     s_led.count = (uint16_t)v;
     size_t len = sizeof s_led.walkway;
     if (boot) s_led.walkway_active = false;
-    if (boot && settings_get_blob("walkway", "config", &s_led.walkway, &len) == ESP_OK &&
+    esp_err_t walkway_err = boot ? settings_get_blob("walkway", "config", &s_led.walkway, &len) : ESP_ERR_NVS_NOT_FOUND;
+    if (boot && walkway_err != ESP_OK && walkway_err != ESP_ERR_NVS_NOT_FOUND)
+        ESP_LOGE(TAG, "Cannot read walkway configuration (%d); using legacy mode; reconfigure walkway", (int)walkway_err);
+    if (boot && walkway_err == ESP_OK && (len != sizeof s_led.walkway || s_led.walkway.version != WALKWAY_CONFIG_VERSION || s_led.walkway.enabled > 1 || walkway_validate(&s_led.walkway.config)))
+        ESP_LOGE(TAG, "Invalid or incompatible walkway configuration; using legacy mode; reconfigure walkway");
+    if (boot && walkway_err == ESP_OK &&
         len == sizeof s_led.walkway && s_led.walkway.version == WALKWAY_CONFIG_VERSION &&
         s_led.walkway.enabled == 1 && !walkway_validate(&s_led.walkway.config)) {
         char radar_kind[16] = "ld2450";

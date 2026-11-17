@@ -20,7 +20,7 @@ int main(void) {
     assert(frame.targets[0].v_cms == 5 && frame.targets[0].resolution_mm == 40);
     assert(frame.distance_cm == 23 && frame.direction == 1 && frame.ts_us == 1000);
     radar_frame_t untouched = frame;
-    assert(radar_ld2450_parse_at(&state, input, 29, &frame, 2000) == 26);
+    assert(radar_ld2450_parse_at(&state, input, 29, &frame, 2000) == 0);
     assert(memcmp(&frame, &untouched, sizeof frame) == 0);
     uint8_t malformed[30];
     memcpy(malformed, input, sizeof input);

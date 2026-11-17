@@ -34,9 +34,7 @@ valid values of the same types as NVS. The firmware's actual settings, timing,
 LED output must still be captured independently for a
 comparison. Physical hardware validation is still required.
 
-The baseline parser discards all but three bytes of some incomplete reads;
-the radar task publishes a zero frame whenever the parser consumes bytes,
-including on malformed input. Replay preserves this behavior. Standard mode
+Since this change, incomplete LD2450 packets are retained across reads, and discarded malformed bytes do not publish a frame. Replay matches the corrected firmware behavior; earlier baseline captures may differ. Standard mode
 also continues to render when the target is absent. These are baseline limits,
 not walkway loss handling. The host currently rejects an input buffer larger
 than 512 bytes instead of reproducing the firmware's overflow recovery.

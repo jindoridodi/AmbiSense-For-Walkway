@@ -142,7 +142,7 @@ class App:
             self.canvas.create_text(50, 210, text='0 cm'); self.canvas.create_text(600, 210, text=f"{data['length_cm']:g} cm")
             for i, side in enumerate(data['side']):
                 for j in range(side['count']):
-                    pos = 0 if side['count'] == 1 else j / (side['count'] - 1)
+                    pos = 0.5 if side['count'] == 1 else j / (side['count'] - 1)
                     index = side['offset'] + (side['count'] - 1 - j if side['reversed'] else j)
                     r, g, b = rgb[index]; px = 50 + pos * 550; py = 80 if i == 0 else 200
                     self.canvas.create_oval(px-3, py-3, px+3, py+3, fill=f'#{r:02x}{g:02x}{b:02x}', outline='gray')

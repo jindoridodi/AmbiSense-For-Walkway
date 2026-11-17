@@ -42,12 +42,9 @@ int main(void) {
                 if (held_len + n / 2 > sizeof held) { fprintf(stderr, "input buffer overflow\n"); return 1; }
                 memcpy(held + held_len, bytes, n / 2); held_len += n / 2;
             }
-            radar_frame_t frame = {0};
+            radar_frame_t frame = {.ts_us = UINT64_MAX};
             size_t used = radar_ld2450_parse_at(&parser, held, held_len, &frame, now);
-            if (used) {
-                replay_motion_input(&frame);
-                memmove(held, held + used, held_len - used); held_len -= used;
-            }
+            if (radar_stream_consume(held, &held_len, used, &frame)) replay_motion_input(&frame);
         } else if (kind == 'R' && !hex[0]) {
             replay_led_render();
             const char *count = getenv("AMBI_led_count");
