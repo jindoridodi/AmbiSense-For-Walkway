@@ -24,6 +24,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
@@ -47,6 +48,11 @@ typedef struct {
     } targets[RADAR_MAX_TARGETS];
     uint64_t  ts_us;
 } radar_frame_t;
+
+typedef struct { int16_t last_distance_cm; } radar_ld2450_state_t;
+
+size_t radar_ld2450_parse_at(radar_ld2450_state_t *state, const uint8_t *buf,
+                            size_t len, radar_frame_t *out, uint64_t ts_us);
 
 typedef struct {
     uint8_t  uart_num;

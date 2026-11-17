@@ -7,7 +7,8 @@ This document describes that baseline, not a completed replay implementation.
 - The LD2450 parser decodes signed millimetres and truncates coordinates to
   centimetres. It selects the first nonempty target's radial distance for
   motion processing, keeps previous distance in static state, and reads the
-  ESP clock directly.
+  ESP clock directly. The parser now also exposes the same decoding with
+  caller-provided state and time for replay.
 - Motion processing consumes radar frames in a FreeRTOS task, clamps radial
   distance and maintains filter state. The renderer independently reads the
   latest motion state on a roughly 16 ms schedule.
@@ -23,3 +24,12 @@ This document describes that baseline, not a completed replay implementation.
 The host/ESP shared build, explicit replay state and clock, final RGB capture,
 protocol fixtures, source identity reporting, and device comparison are still
 required. No hardware validation is implied by this inventory.
+
+The parser fixture can be run on a host with a C compiler:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -Itests/stubs \
+  -Ifirmware/components/radar/include tests/ld2450_replay.c \
+  firmware/components/radar/radar_ld2450.c -o /tmp/ambisense-ld2450-test
+/tmp/ambisense-ld2450-test
+```

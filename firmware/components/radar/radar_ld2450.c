@@ -30,7 +30,8 @@ static int16_t decode_signed(uint16_t raw) {
     return (raw & 0x8000) ? v : -v;
 }
 
-size_t radar_ld2450_parse(const uint8_t *buf, size_t len, radar_frame_t *out) {
+size_t radar_ld2450_parse_at(radar_ld2450_state_t *state, const uint8_t *buf,
+                            size_t len, radar_frame_t *out, uint64_t ts_us) {
     for (size_t start = 0; start + LD2450_FRAME_LEN <= len; ++start) {
         if (memcmp(buf + start, HEAD, 4) != 0) continue;
         const uint8_t *t = buf + start + LD2450_FRAME_LEN - 2;
@@ -82,12 +83,16 @@ size_t radar_ld2450_parse(const uint8_t *buf, size_t len, radar_frame_t *out) {
         out->target_count = tcount;
         out->energy = 0;  /* LD2450 doesn't report energy; left zero. */
 
-        static int16_t s_last = 0;
-        int16_t delta = primary_distance - s_last;
+        int16_t delta = primary_distance - state->last_distance_cm;
         out->direction = delta < -3 ? -1 : (delta > 3 ? 1 : 0);
-        s_last = primary_distance;
-        out->ts_us = (uint64_t)esp_timer_get_time();
+        state->last_distance_cm = primary_distance;
+        out->ts_us = ts_us;
         return start + LD2450_FRAME_LEN;
     }
     return len > 3 ? len - 3 : 0;
+}
+
+size_t radar_ld2450_parse(const uint8_t *buf, size_t len, radar_frame_t *out) {
+    static radar_ld2450_state_t state;
+    return radar_ld2450_parse_at(&state, buf, len, out, (uint64_t)esp_timer_get_time());
 }
