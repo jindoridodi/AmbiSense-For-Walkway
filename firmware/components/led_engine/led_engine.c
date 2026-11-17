@@ -12,6 +12,8 @@
 
 #include "motion.h"
 #include "settings.h"
+#include "walkway.h"
+#include "radar.h"
 
 static const char *TAG = "led_engine";
 
@@ -37,6 +39,8 @@ static struct {
     uint8_t   effect_speed;
     uint8_t   effect_intensity;
     uint16_t  min_cm, max_cm;
+    walkway_saved_t walkway;
+    bool walkway_active;
 
     /* Mode-private state */
     uint32_t  step;            /* effect frame counter */
@@ -271,6 +275,16 @@ static void mode_motion_particles(int start) {
 /* ------ main render task ------------------------------------------- */
 
 static void render_frame(void) {
+    if (s_led.walkway_active) {
+        static uint8_t rgb[MAX_LEDS][3];
+        radar_frame_t frame = {0};
+        uint64_t now = (uint64_t)esp_timer_get_time();
+        if (radar_peek(&frame) != ESP_OK || frame.ts_us > now || now - frame.ts_us > 250000) memset(&frame, 0, sizeof frame);
+        walkway_render(&s_led.walkway.config, &frame, rgb, MAX_LEDS);
+        for (int i = 0; i < s_led.count; ++i)
+            led_strip_set_pixel(s_led.strip, i, rgb[i][0], rgb[i][1], rgb[i][2]);
+        return;
+    }
     target_t t = {0};
     motion_get(&t);
     int start = distance_to_start_led(t.distance_cm);
@@ -316,13 +330,27 @@ static void render_task(void *arg) {
 
 /* ------ init / reload ---------------------------------------------- */
 
-static void load_settings_from_nvs(void) {
+static void load_settings_from_nvs(bool boot) {
     uint32_t v;
     uint8_t  b;
     v = DEFAULT_LEDS;        settings_get_u32("led", "count", &v);
     if (v < 1) v = DEFAULT_LEDS;
     if (v > MAX_LEDS) v = MAX_LEDS;
     s_led.count = (uint16_t)v;
+    size_t len = sizeof s_led.walkway;
+    if (boot) s_led.walkway_active = false;
+    if (boot && settings_get_blob("walkway", "config", &s_led.walkway, &len) == ESP_OK &&
+        len == sizeof s_led.walkway && s_led.walkway.version == WALKWAY_CONFIG_VERSION &&
+        s_led.walkway.enabled == 1 && !walkway_validate(&s_led.walkway.config)) {
+        char radar_kind[16] = "ld2450";
+        settings_get_radar_kind(radar_kind, sizeof radar_kind);
+        if (!strcmp(radar_kind, "ld2450")) {
+            s_led.walkway_active = true;
+            s_led.count = s_led.walkway.config.chain_count;
+        } else ESP_LOGE(TAG, "Walkway requires LD2450; using legacy mode");
+    }
+
+    if (s_led.walkway_active) s_led.count = s_led.walkway.config.chain_count;
 
     b = 80;                  settings_get_u8("led", "br", &b);
     s_led.brightness = b;
@@ -347,7 +375,7 @@ static void load_settings_from_nvs(void) {
 
 void led_engine_reload(void) {
     uint16_t prev_count = s_led.count;
-    load_settings_from_nvs();
+    load_settings_from_nvs(false);
     if (s_led.count != prev_count) {
         ESP_LOGI(TAG, "LED count changed %u → %u; reallocating buffers", prev_count, s_led.count);
         if (s_led.fire_heat) { free(s_led.fire_heat); s_led.fire_heat = NULL; }
@@ -370,7 +398,7 @@ void led_engine_reload(void) {
 
 esp_err_t led_engine_init(uint8_t data_gpio) {
     s_led.data_gpio = data_gpio;
-    load_settings_from_nvs();
+    load_settings_from_nvs(true);
 
     s_led.fire_heat  = calloc(s_led.count, 1);
     s_led.prev_frame = calloc(s_led.count, sizeof(rgb_t));
@@ -407,7 +435,7 @@ esp_err_t led_engine_init(uint8_t data_gpio) {
 void replay_led_reset(void) {
     free(s_led.fire_heat); free(s_led.prev_frame);
     memset(&s_led, 0, sizeof(s_led));
-    load_settings_from_nvs();
+    load_settings_from_nvs(true);
     s_led.fire_heat = calloc(s_led.count, 1);
     s_led.prev_frame = calloc(s_led.count, sizeof(rgb_t));
 }
