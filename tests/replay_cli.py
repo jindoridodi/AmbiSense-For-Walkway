@@ -36,3 +36,13 @@ rainbow = subprocess.run(
     env=config | {"AMBI_led_mode": "1"}, capture_output=True, check=True,
 )
 assert rainbow.stdout.split()[1] == "005000"
+
+# -123 mm, +207 mm become -12 cm, +20 cm, then 23 cm radial distance.
+quantized = subprocess.run(
+    ["./ambisense-replay"],
+    input="I 1000 aaff03007b00cf80058028000000000000000000000000000000000055cc\nR 1000\n",
+    text=True, env=config | {"AMBI_dist_max": "48"}, capture_output=True, check=True,
+)
+assert quantized.stdout == (
+    "1000 000000 000000 000000 505050 505050 000000 000000 000000 000000 000000\n"
+)

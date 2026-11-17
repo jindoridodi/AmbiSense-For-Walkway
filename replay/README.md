@@ -32,7 +32,7 @@ asynchronous device task scheduler. Standard, rainbow and solid modes are
 supported; other effects are not validated for replay. The host substitutes assume settings are
 valid values of the same types as NVS. The firmware's actual settings, timing,
 LED output must still be captured independently for a
-comparison. No ESP build or physical hardware validation is implied.
+comparison. Physical hardware validation is still required.
 
 The baseline parser discards all but three bytes of some incomplete reads;
 the radar task publishes a zero frame whenever the parser consumes bytes,
@@ -40,3 +40,15 @@ including on malformed input. Replay preserves this behavior. Standard mode
 also continues to render when the target is absent. These are baseline limits,
 not walkway loss handling. The host currently rejects an input buffer larger
 than 512 bytes instead of reproducing the firmware's overflow recovery.
+
+The production firmware, including the shared parser, motion and renderer,
+was built for ESP32-C3 with ESP-IDF v5.3 at `c9ccabb4f9355a4b1e0ad41501e871350cc08c5b`
+with a dirty worktree (the added host fixture). To repeat from `firmware/`:
+
+```sh
+. "$IDF_PATH/export.sh"
+idf.py set-target esp32c3
+idf.py build
+```
+
+The build confirms compilation, not equivalent device scheduling or physical output.
