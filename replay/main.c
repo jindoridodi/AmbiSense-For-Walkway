@@ -18,7 +18,9 @@ int main(void) {
     uint8_t held[512]; size_t held_len = 0;
     fprintf(stderr, "source: %s; dirty at build: %s\n", BUILD_COMMIT, BUILD_DIRTY);
     const char *mode = getenv("AMBI_led_mode");
-    if (mode && strcmp(mode, "0") != 0) { fprintf(stderr, "only standard mode is supported\n"); return 1; }
+    if (mode && strcmp(mode, "0") != 0 && strcmp(mode, "1") != 0 && strcmp(mode, "4") != 0) {
+        fprintf(stderr, "supported modes are standard (0), rainbow (1), and solid (4)\n"); return 1;
+    }
     replay_motion_reset(); replay_led_reset();
     while (fgets(line, sizeof line, stdin)) {
         if (line[0] == '#' || line[0] == '\n') continue;

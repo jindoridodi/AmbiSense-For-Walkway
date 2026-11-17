@@ -24,9 +24,9 @@ This document describes that baseline, not a completed replay implementation.
   above its supported range it can underreport the radial distance (for
   example, 500 cm on one axis produces 255 cm). This is a baseline defect.
 
-The host/ESP shared build, explicit replay state and clock, final RGB capture,
-protocol fixtures, source identity reporting, and device comparison are still
-required. No hardware validation is implied by this inventory.
+The host replay shares the production sources and provides explicit replay
+state, time, RGB capture, fixtures and source identity. Device-side capture and
+comparison remain future work. No hardware validation is implied.
 
 The parser fixture can be run on a host with a C compiler:
 

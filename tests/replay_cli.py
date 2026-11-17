@@ -26,3 +26,13 @@ incomplete = subprocess.run(
 assert incomplete.stdout == (
     "1000 505050 505050 000000 000000 000000 000000 000000 000000 000000 000000\n"
 )
+solid = subprocess.run(
+    ["./ambisense-replay"], input="R 1000\n", text=True,
+    env=config | {"AMBI_led_mode": "4"}, capture_output=True, check=True,
+)
+assert solid.stdout == "1000" + " 505050" * 10 + "\n"
+rainbow = subprocess.run(
+    ["./ambisense-replay"], input="R 1000\n", text=True,
+    env=config | {"AMBI_led_mode": "1"}, capture_output=True, check=True,
+)
+assert rainbow.stdout.split()[1] == "005000"

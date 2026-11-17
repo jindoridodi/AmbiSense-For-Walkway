@@ -28,8 +28,8 @@ printf 'I 1000 aaff03000000e883000001000000000000000000000000000000000055cc\nR 1
 ```
 
 This models one deterministic ordering of radar and render events, not the
-asynchronous device task scheduler. Only standard mode is supported; other
-effects are not validated for replay. The host substitutes assume settings are
+asynchronous device task scheduler. Standard, rainbow and solid modes are
+supported; other effects are not validated for replay. The host substitutes assume settings are
 valid values of the same types as NVS. The firmware's actual settings, timing,
 LED output must still be captured independently for a
 comparison. No ESP build or physical hardware validation is implied.
