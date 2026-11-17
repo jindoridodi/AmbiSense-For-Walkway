@@ -3,6 +3,7 @@
 #include <string.h>
 #include "radar.h"
 #include "walkway.h"
+#include "led_engine.h"
 extern walkway_saved_t replay_walkway;
 extern radar_frame_t replay_radar;
 extern uint64_t replay_now;
@@ -24,6 +25,12 @@ int main(void) {
         replay_walkway.config.side[0].reversed = directions & 1;
         replay_walkway.config.side[1].reversed = directions & 2;
         replay_led_reset();
+        assert(led_engine_walkway_active());
+        assert(!led_engine_walkway_restart_pending());
+        led_engine_walkway_saved();
+        assert(led_engine_walkway_active() && led_engine_walkway_restart_pending());
+        replay_led_reset();
+        assert(led_engine_walkway_active() && !led_engine_walkway_restart_pending());
         for (int p = 0; p < 5; ++p) {
             int mm = positions[p] * 10;
             input[6] = mm & 255; input[7] = 0x80 | (mm >> 8);
@@ -52,6 +59,17 @@ int main(void) {
         assert(replay_rgb[0][0] == 80);
     }
     replay_walkway.config.side[0].count = 6;
+    replay_walkway.enabled = 0;
+    replay_led_reset();
+    assert(!led_engine_walkway_active() && !led_engine_walkway_restart_pending());
+    led_engine_walkway_saved();
+    assert(!led_engine_walkway_active() && led_engine_walkway_restart_pending());
+    replay_walkway.enabled = 1;
+    replay_walkway.version = 2;
+    replay_led_reset();
+    assert(!led_engine_walkway_active() && !led_engine_walkway_restart_pending());
+    replay_walkway.version = 1;
+    replay_led_reset();
     replay_radar.targets[0].x_cm = 31; replay_led_render();
     for (int i = 0; i < 17; ++i) assert(!replay_rgb[i][0]);
     replay_walkway.config.side[1].offset = 5;

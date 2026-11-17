@@ -39,6 +39,10 @@ esp_err_t led_engine_init(uint8_t data_gpio);
  * any LED key). */
 void led_engine_reload(void);
 
+bool led_engine_walkway_active(void);
+bool led_engine_walkway_restart_pending(void);
+void led_engine_walkway_saved(void);
+
 #ifdef __cplusplus
 }
 #endif

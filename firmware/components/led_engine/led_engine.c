@@ -44,6 +44,7 @@ static struct {
     uint16_t  min_cm, max_cm;
     walkway_saved_t walkway;
     bool walkway_active;
+    bool walkway_restart_pending;
 
     /* Mode-private state */
     uint32_t  step;            /* effect frame counter */
@@ -381,6 +382,10 @@ static void load_settings_from_nvs(bool boot) {
     v = 30;  settings_get_u32("dist", "min", &v); s_led.min_cm = v;
     v = 300; settings_get_u32("dist", "max", &v); s_led.max_cm = v;
 }
+
+bool led_engine_walkway_active(void) { return s_led.walkway_active; }
+bool led_engine_walkway_restart_pending(void) { return s_led.walkway_restart_pending; }
+void led_engine_walkway_saved(void) { s_led.walkway_restart_pending = true; }
 
 void led_engine_reload(void) {
     uint16_t prev_count = s_led.count;

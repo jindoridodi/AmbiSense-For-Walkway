@@ -847,6 +847,20 @@ static esp_err_t handle_walkway_get(httpd_req_t *req) {
     return send_json(req, walkway_json(&saved));
 }
 
+static esp_err_t handle_walkway_status(httpd_req_t *req) {
+    if (!gate_auth(req)) return ESP_OK;
+    walkway_saved_t saved = {0}; size_t len = sizeof saved;
+    esp_err_t err = settings_get_blob("walkway", "config", &saved, &len);
+    bool invalid = err != ESP_ERR_NVS_NOT_FOUND && (err != ESP_OK ||
+        len != sizeof saved || saved.version != WALKWAY_CONFIG_VERSION ||
+        saved.enabled > 1 || walkway_validate(&saved.config));
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(result, "active", led_engine_walkway_active());
+    cJSON_AddBoolToObject(result, "restart_pending", led_engine_walkway_restart_pending());
+    cJSON_AddBoolToObject(result, "invalid", invalid);
+    return send_json(req, result);
+}
+
 static esp_err_t handle_walkway_post(httpd_req_t *req) {
     if (!gate_auth(req)) return ESP_OK;
     cJSON *j = read_body_json(req); if (!j) return send_err(req, 400, "bad json");
@@ -889,6 +903,7 @@ static esp_err_t handle_walkway_post(httpd_req_t *req) {
     if (settings_set_blob("walkway", "config", &saved, sizeof saved) != ESP_OK) {
         cJSON_Delete(j); return send_err(req, 500, "failed to save walkway configuration");
     }
+    led_engine_walkway_saved();
     cJSON_Delete(j);
     cJSON *result = cJSON_CreateObject(); cJSON_AddBoolToObject(result, "ok", true);
     cJSON_AddBoolToObject(result, "restart_required", true); return send_json(req, result);
@@ -1386,6 +1401,7 @@ static const httpd_uri_t k_routes[] = {
     { "/api/board",                      HTTP_POST, handle_board_post,       NULL },
     { "/api/radar/kinds",                HTTP_GET,  handle_radar_kinds,      NULL },
     { "/api/radar/diag",                 HTTP_GET,  handle_radar_diag,       NULL },
+    { "/api/walkway/status",             HTTP_GET,  handle_walkway_status,   NULL },
     { "/api/walkway",                    HTTP_GET,  handle_walkway_get,      NULL },
     { "/api/walkway",                    HTTP_POST, handle_walkway_post,     NULL },
     { "/api/settings",                   HTTP_GET,  handle_settings_get,     NULL },
