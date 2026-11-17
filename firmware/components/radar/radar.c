@@ -121,21 +121,16 @@ static void radar_task(void *arg) {
                 s_radar.diag_last_len = sizeof(s_radar.diag_last);
         }
 
-        radar_frame_t frame = {0};
+        radar_frame_t frame = {.ts_us = UINT64_MAX};
         size_t consumed = s_radar.drv->parse(rx, held, &frame);
-        if (consumed > 0) {
+        if (radar_stream_consume(rx, &held, consumed, &frame)) {
             xQueueOverwrite(s_radar.q, &frame);
-            if (frame.ts_us != 0) {
-                s_radar.diag_frames++;
-                s_radar.diag_last_frame_us = frame.ts_us;
-            }
-            /* Fan-out snapshot for radar_peek() consumers. */
+            s_radar.diag_frames++;
+            s_radar.diag_last_frame_us = frame.ts_us;
             xSemaphoreTake(s_radar.latest_lock, portMAX_DELAY);
             s_radar.latest = frame;
             s_radar.latest_valid = true;
             xSemaphoreGive(s_radar.latest_lock);
-            if (consumed < held) memmove(rx, rx + consumed, held - consumed);
-            held -= consumed;
         }
     }
 }

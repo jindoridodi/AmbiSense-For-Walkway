@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <math.h>
+#include "walkway.h"
 
 #include "esp_log.h"
 #include "esp_http_server.h"
@@ -25,6 +27,7 @@
 #include "ota.h"
 #include "board.h"
 #include "led_engine.h"
+#include "build_identity.h"
 #include "radar.h"
 #include "motion.h"
 #include "presence.h"
@@ -327,6 +330,8 @@ static esp_err_t handle_version(httpd_req_t *req) {
     cJSON *r = cJSON_CreateObject();
 
     cJSON_AddStringToObject(r, "version", app->version);
+    cJSON_AddStringToObject(r, "source_commit", AMBISENSE_BUILD_COMMIT);
+    cJSON_AddStringToObject(r, "source_dirty", AMBISENSE_BUILD_DIRTY);
     cJSON_AddStringToObject(r, "idf_version", app->idf_ver);
     cJSON_AddStringToObject(r, "build_date", app->date);
     cJSON_AddStringToObject(r, "build_time", app->time);
@@ -801,6 +806,111 @@ static esp_err_t handle_settings_post(httpd_req_t *req) {
     return send_json(req, r);
 }
 
+/* Versioned, complete replacement avoids persisting partially validated geometry. */
+static bool walkway_number(cJSON *j, const char *name, double min, double max, bool integer, double *out) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(j, name);
+    if (!cJSON_IsNumber(v) || !isfinite(v->valuedouble) || v->valuedouble < min ||
+        v->valuedouble > max || (integer && floor(v->valuedouble) != v->valuedouble)) return false;
+    *out = v->valuedouble;
+    return true;
+}
+
+static cJSON *walkway_json(const walkway_saved_t *saved) {
+    const walkway_config_t *c = &saved->config;
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddNumberToObject(j, "version", saved->version);
+    cJSON_AddBoolToObject(j, "enabled", saved->enabled);
+#define ADD_FIELD(f) cJSON_AddNumberToObject(j, #f, c->f)
+    ADD_FIELD(length_cm); ADD_FIELD(width_cm); ADD_FIELD(tolerance_cm); ADD_FIELD(footprint_cm);
+    ADD_FIELD(radar_x_cm); ADD_FIELD(radar_y_cm); ADD_FIELD(radar_angle_deg); ADD_FIELD(chain_count);
+    ADD_FIELD(brightness); ADD_FIELD(red); ADD_FIELD(green); ADD_FIELD(blue);
+#undef ADD_FIELD
+    cJSON *sides = cJSON_AddArrayToObject(j, "side");
+    for (int i = 0; i < 2; ++i) {
+        cJSON *side = cJSON_CreateObject(); cJSON_AddItemToArray(sides, side);
+        cJSON_AddNumberToObject(side, "length_cm", c->side[i].length_cm);
+        cJSON_AddNumberToObject(side, "count", c->side[i].count);
+        cJSON_AddNumberToObject(side, "offset", c->side[i].offset);
+        cJSON_AddBoolToObject(side, "reversed", c->side[i].reversed);
+    }
+    return j;
+}
+
+static esp_err_t handle_walkway_get(httpd_req_t *req) {
+    if (!gate_auth(req)) return ESP_OK;
+    walkway_saved_t saved = {0}; size_t len = sizeof saved;
+    esp_err_t err = settings_get_blob("walkway", "config", &saved, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return send_err(req, 404, "walkway configuration not found");
+    if (err != ESP_OK) return send_err(req, 500, "cannot read walkway configuration; reconfigure walkway");
+    if (len != sizeof saved || saved.version != WALKWAY_CONFIG_VERSION || saved.enabled > 1 || walkway_validate(&saved.config))
+        return send_err(req, 500, "incompatible walkway configuration");
+    return send_json(req, walkway_json(&saved));
+}
+
+static esp_err_t handle_walkway_status(httpd_req_t *req) {
+    if (!gate_auth(req)) return ESP_OK;
+    walkway_saved_t saved = {0}; size_t len = sizeof saved;
+    esp_err_t err = settings_get_blob("walkway", "config", &saved, &len);
+    bool invalid = err != ESP_ERR_NVS_NOT_FOUND && (err != ESP_OK ||
+        len != sizeof saved || saved.version != WALKWAY_CONFIG_VERSION ||
+        saved.enabled > 1 || walkway_validate(&saved.config));
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(result, "active", led_engine_walkway_active());
+    cJSON_AddBoolToObject(result, "restart_pending", led_engine_walkway_restart_pending());
+    cJSON_AddBoolToObject(result, "invalid", invalid);
+    return send_json(req, result);
+}
+
+static esp_err_t handle_walkway_post(httpd_req_t *req) {
+    if (!gate_auth(req)) return ESP_OK;
+    cJSON *j = read_body_json(req); if (!j) return send_err(req, 400, "bad json");
+    walkway_saved_t saved = {0}; walkway_config_t *c = &saved.config; double v;
+    const char *error = "missing or invalid walkway field";
+#define NUM(name, lo, hi, integer, dest) do { if (!walkway_number(j, name, lo, hi, integer, &v)) goto invalid; dest = v; } while (0)
+    NUM("version", 1, 1, true, saved.version);
+    cJSON *enabled = cJSON_GetObjectItemCaseSensitive(j, "enabled");
+    if (!cJSON_IsBool(enabled)) goto invalid;
+    saved.enabled = cJSON_IsTrue(enabled);
+    NUM("length_cm", 0, 1000000, false, c->length_cm);
+    NUM("width_cm", 0, 1000000, false, c->width_cm);
+    NUM("tolerance_cm", 0, 1000000, false, c->tolerance_cm);
+    NUM("footprint_cm", 0, 1000000, false, c->footprint_cm);
+    NUM("radar_x_cm", -1000000, 1000000, false, c->radar_x_cm);
+    NUM("radar_y_cm", -1000000, 1000000, false, c->radar_y_cm);
+    NUM("radar_angle_deg", -360000, 360000, false, c->radar_angle_deg);
+    NUM("chain_count", 1, 1500, true, c->chain_count);
+    NUM("brightness", 0, 255, true, c->brightness);
+    NUM("red", 0, 255, true, c->red); NUM("green", 0, 255, true, c->green); NUM("blue", 0, 255, true, c->blue);
+    cJSON *sides = cJSON_GetObjectItemCaseSensitive(j, "side");
+    if (!cJSON_IsArray(sides) || cJSON_GetArraySize(sides) != 2) goto invalid;
+    for (int i = 0; i < 2; ++i) {
+        cJSON *side = cJSON_GetArrayItem(sides, i); if (!cJSON_IsObject(side)) goto invalid;
+        cJSON *rev = cJSON_GetObjectItemCaseSensitive(side, "reversed"); if (!cJSON_IsBool(rev)) goto invalid;
+        c->side[i].reversed = cJSON_IsTrue(rev);
+        if (!walkway_number(side, "length_cm", 0, 1000000, false, &v)) goto invalid;
+        c->side[i].length_cm = v;
+        if (!walkway_number(side, "count", 1, 1500, true, &v)) goto invalid;
+        c->side[i].count = v;
+        if (!walkway_number(side, "offset", 0, 1499, true, &v)) goto invalid;
+        c->side[i].offset = v;
+    }
+#undef NUM
+    error = walkway_validate(c); if (error) goto invalid;
+    if (saved.enabled) {
+        char radar_kind[16] = "ld2450"; settings_get_radar_kind(radar_kind, sizeof radar_kind);
+        if (strcmp(radar_kind, "ld2450")) { error = "walkway requires LD2450"; goto invalid; }
+    }
+    if (settings_set_blob("walkway", "config", &saved, sizeof saved) != ESP_OK) {
+        cJSON_Delete(j); return send_err(req, 500, "failed to save walkway configuration");
+    }
+    led_engine_walkway_saved();
+    cJSON_Delete(j);
+    cJSON *result = cJSON_CreateObject(); cJSON_AddBoolToObject(result, "ok", true);
+    cJSON_AddBoolToObject(result, "restart_required", true); return send_json(req, result);
+invalid:
+    cJSON_Delete(j); return send_err(req, 400, error);
+}
+
 /* ============================================================
  *  /api/presence — current presence snapshot for room-presence /
  *  Home Assistant integrations. WS clients get the same data inline
@@ -916,6 +1026,8 @@ static esp_err_t handle_v1_info(httpd_req_t *req) {
     cJSON_AddNumberToObject(stream, "frame_period_ms", 3000);
     const esp_app_desc_t *app = esp_app_get_description();
     cJSON_AddStringToObject(r, "fw_version", app ? app->version : "unknown");
+    cJSON_AddStringToObject(r, "source_commit", AMBISENSE_BUILD_COMMIT);
+    cJSON_AddStringToObject(r, "source_dirty", AMBISENSE_BUILD_DIRTY);
     char hub_id[40]; make_hub_id(hub_id, sizeof(hub_id));
     cJSON_AddStringToObject(r, "hub_id",    hub_id);
     cJSON_AddStringToObject(r, "unique_id", hub_id);  /* alias for older integration code */
@@ -1289,6 +1401,9 @@ static const httpd_uri_t k_routes[] = {
     { "/api/board",                      HTTP_POST, handle_board_post,       NULL },
     { "/api/radar/kinds",                HTTP_GET,  handle_radar_kinds,      NULL },
     { "/api/radar/diag",                 HTTP_GET,  handle_radar_diag,       NULL },
+    { "/api/walkway/status",             HTTP_GET,  handle_walkway_status,   NULL },
+    { "/api/walkway",                    HTTP_GET,  handle_walkway_get,      NULL },
+    { "/api/walkway",                    HTTP_POST, handle_walkway_post,     NULL },
     { "/api/settings",                   HTTP_GET,  handle_settings_get,     NULL },
     { "/api/settings",                   HTTP_POST, handle_settings_post,    NULL },
     { "/api/distance",                   HTTP_GET,  handle_distance,         NULL },

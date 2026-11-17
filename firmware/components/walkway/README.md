@@ -1,0 +1,15 @@
+# Straight walkway mode, configuration version 1
+
+This software-only first stage has not been validated on hardware. It supports one straight segment and one LD2450. Turns, target association, hold/fade on loss, and other walkway effects are unsupported. It selects the first accepted target and immediately clears when no accepted target is available or the latest frame is over 250 ms old. Legacy effects continue when walkway mode is disabled.
+
+Use `GET /api/walkway` and `POST /api/walkway` with the complete JSON below. POST validates the whole configuration before storing one versioned NVS blob. Reboot to apply it. `GET /api/walkway/status` reports the boot-applied `active` mode, whether a saved change is `restart_pending`, and whether the saved configuration is `invalid`. GET returns 404 if no configuration exists and an error if the saved version or data is incompatible. Invalid or incompatible saved configurations produce a boot error log and fall back to legacy mode; submit a valid configuration and reboot. The device requires the LD2450 driver when enabled. The chain count overrides the legacy LED count while enabled; the configured color and brightness override legacy effect settings.
+
+```json
+{"version":1,"enabled":true,"length_cm":100,"width_cm":60,"tolerance_cm":5,"footprint_cm":20,"radar_x_cm":0,"radar_y_cm":0,"radar_angle_deg":0,"chain_count":17,"brightness":80,"red":255,"green":255,"blue":255,"side":[{"length_cm":100,"count":6,"offset":0,"reversed":false},{"length_cm":150,"count":11,"offset":6,"reversed":true}]}
+```
+
+Distances are centimetres; angles are degrees counterclockwise. Path starts at (0,0), ends at (0,length), and its centreline follows +Y. Radar X/Y are sensor-relative coordinates from the LD2450 parser; the transform rotates them by `radar_angle_deg` then adds the configured radar position. A detection is accepted when its transformed Y is in the closed segment and its absolute X is at most half the width plus tolerance. Actual sensor signs, orientation and coverage require installation checks; coverage predictions are not guarantees.
+
+Both side strips cover the whole segment in progress, even if their physical lengths differ. Offsets are zero-based in the one data chain, with count consecutive indexes; ranges must not overlap or extend beyond `chain_count` (1–1500). Each side has equally spaced LED centres from 0% to 100%; `reversed` maps 0% to the last index. A one-LED side covers the whole segment. The centered footprint is measured along the path and clipped at endpoints. An LED is lit when its centre's cell intersects the footprint, including ties; this can light two adjacent LEDs exactly at a cell boundary. RGB channels are multiplied by brightness / 255 and truncated to integer. Dimensions must be positive, tolerance nonnegative, and all finite; positions and dimensions are bounded to 1,000,000 cm, angles to ±360,000 degrees.
+
+No firmware-to-hardware parity or physical LED wiring, sensor orientation, alignment, or coverage has been validated. The actual firmware build identity is available at `/api/version`; use the helper built from the same commit and configuration.

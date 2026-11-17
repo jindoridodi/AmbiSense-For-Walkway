@@ -222,6 +222,13 @@ function DevField({ k, v }: any) {
 /* ================================================================= */
 export function ScreenLeds({ settings, live, reload, setToast }: AppState) {
   const [s, setS] = useState(settings);
+  const [walkway, setWalkway] = useState<any>(null);
+  useEffect(() => {
+    const refresh = () => getJSON("/api/walkway/status").then(setWalkway).catch(() => setWalkway({ error: true }));
+    refresh();
+    const timer = setInterval(refresh, 2000);
+    return () => clearInterval(timer);
+  }, []);
   useEffect(() => setS(settings), [JSON.stringify(settings)]);
   const debouncedSave = useDebouncedSave(reload, setToast);
   /* `save` updates local state immediately so the slider/preview feel
@@ -242,6 +249,10 @@ export function ScreenLeds({ settings, live, reload, setToast }: AppState) {
 
   return (
     <>
+      {walkway?.error && <div class="card" style="padding: 14px; margin-bottom: 14px;">Unable to read walkway status.</div>}
+      {walkway?.invalid && <div class="card" style="padding: 14px; margin-bottom: 14px;">Walkway configuration is unreadable or incompatible. Reconfigure walkway and reboot; check the boot log for details.</div>}
+      {walkway?.restart_pending && <div class="card" style="padding: 14px; margin-bottom: 14px;">Walkway settings were saved. Restart the device to apply them.</div>}
+      {walkway?.active && <div class="card" style="padding: 14px; margin-bottom: 14px;">Walkway mode is active and overrides these legacy effect, color, and brightness controls. Other effects are unsupported in walkway mode; this preview shows legacy output.</div>}
       <PageHead title="LEDs" sub={`${LED_MODE_NAMES[mode]} · ${s.led_count ?? 30} pixels · ${s.min_distance ?? 30}–${s.max_distance ?? 300} cm`}/>
 
       <div class="card" style="padding: 18px; margin-bottom: 14px;">

@@ -5,6 +5,9 @@
 #include <math.h>
 
 #include "esp_log.h"
+#ifndef AMBISENSE_HOST_REPLAY
+#include "nvs.h"
+#endif
 #include "esp_timer.h"
 #include "led_strip.h"
 #include "freertos/FreeRTOS.h"
@@ -12,6 +15,8 @@
 
 #include "motion.h"
 #include "settings.h"
+#include "walkway.h"
+#include "radar.h"
 
 static const char *TAG = "led_engine";
 
@@ -37,6 +42,9 @@ static struct {
     uint8_t   effect_speed;
     uint8_t   effect_intensity;
     uint16_t  min_cm, max_cm;
+    walkway_saved_t walkway;
+    bool walkway_active;
+    bool walkway_restart_pending;
 
     /* Mode-private state */
     uint32_t  step;            /* effect frame counter */
@@ -270,6 +278,40 @@ static void mode_motion_particles(int start) {
 
 /* ------ main render task ------------------------------------------- */
 
+static void render_frame(void) {
+    if (s_led.walkway_active) {
+        static uint8_t rgb[MAX_LEDS][3];
+        radar_frame_t frame = {0};
+        esp_err_t peek_result = radar_peek(&frame);
+        uint64_t now = (uint64_t)esp_timer_get_time();
+        if (peek_result != ESP_OK || frame.ts_us > now || now - frame.ts_us > 250000) memset(&frame, 0, sizeof frame);
+        walkway_render(&s_led.walkway.config, &frame, rgb, MAX_LEDS);
+        for (int i = 0; i < s_led.count; ++i)
+            led_strip_set_pixel(s_led.strip, i, rgb[i][0], rgb[i][1], rgb[i][2]);
+        return;
+    }
+    target_t t = {0};
+    motion_get(&t);
+    int start = distance_to_start_led(t.distance_cm);
+
+    switch (s_led.mode) {
+        case LED_MODE_STANDARD:     mode_standard(start);     break;
+        case LED_MODE_RAINBOW:      mode_rainbow();           break;
+        case LED_MODE_COLOR_WAVE:       mode_color_wave();        break;
+        case LED_MODE_BREATHING:    mode_breathing();         break;
+        case LED_MODE_SOLID:        mode_solid();         break;
+        case LED_MODE_COMET:        mode_comet(start);        break;
+        case LED_MODE_PULSE:        mode_pulse(start);        break;
+        case LED_MODE_FIRE:         mode_fire();          break;
+        case LED_MODE_THEATER_CHASE:    mode_theater_chase();     break;
+        case LED_MODE_DUAL_SCAN:    mode_dual_scan(start);    break;
+        case LED_MODE_MOTION_PARTICLES: mode_motion_particles(start); break;
+        default:             mode_standard(start);     break;
+    }
+
+    s_led.step++;
+}
+
 static void render_task(void *arg) {
     (void)arg;
     while (1) {
@@ -285,40 +327,40 @@ static void render_task(void *arg) {
             continue;
         }
 
-        target_t t = {0};
-        motion_get(&t);
-        int start = distance_to_start_led(t.distance_cm);
-
-        switch (s_led.mode) {
-            case LED_MODE_STANDARD:         mode_standard(start);         break;
-            case LED_MODE_RAINBOW:          mode_rainbow();               break;
-            case LED_MODE_COLOR_WAVE:       mode_color_wave();            break;
-            case LED_MODE_BREATHING:        mode_breathing();             break;
-            case LED_MODE_SOLID:            mode_solid();                 break;
-            case LED_MODE_COMET:            mode_comet(start);            break;
-            case LED_MODE_PULSE:            mode_pulse(start);            break;
-            case LED_MODE_FIRE:             mode_fire();                  break;
-            case LED_MODE_THEATER_CHASE:    mode_theater_chase();         break;
-            case LED_MODE_DUAL_SCAN:        mode_dual_scan(start);        break;
-            case LED_MODE_MOTION_PARTICLES: mode_motion_particles(start); break;
-            default:                         mode_standard(start);         break;
-        }
-
+        render_frame();
         led_strip_refresh(s_led.strip);
-        s_led.step++;
         vTaskDelay(pdMS_TO_TICKS(16));  /* ~60 Hz */
     }
 }
 
 /* ------ init / reload ---------------------------------------------- */
 
-static void load_settings_from_nvs(void) {
+static void load_settings_from_nvs(bool boot) {
     uint32_t v;
     uint8_t  b;
     v = DEFAULT_LEDS;        settings_get_u32("led", "count", &v);
     if (v < 1) v = DEFAULT_LEDS;
     if (v > MAX_LEDS) v = MAX_LEDS;
     s_led.count = (uint16_t)v;
+    size_t len = sizeof s_led.walkway;
+    if (boot) s_led.walkway_active = false;
+    esp_err_t walkway_err = boot ? settings_get_blob("walkway", "config", &s_led.walkway, &len) : ESP_ERR_NVS_NOT_FOUND;
+    if (boot && walkway_err != ESP_OK && walkway_err != ESP_ERR_NVS_NOT_FOUND)
+        ESP_LOGE(TAG, "Cannot read walkway configuration (%d); using legacy mode; reconfigure walkway", (int)walkway_err);
+    if (boot && walkway_err == ESP_OK && (len != sizeof s_led.walkway || s_led.walkway.version != WALKWAY_CONFIG_VERSION || s_led.walkway.enabled > 1 || walkway_validate(&s_led.walkway.config)))
+        ESP_LOGE(TAG, "Invalid or incompatible walkway configuration; using legacy mode; reconfigure walkway");
+    if (boot && walkway_err == ESP_OK &&
+        len == sizeof s_led.walkway && s_led.walkway.version == WALKWAY_CONFIG_VERSION &&
+        s_led.walkway.enabled == 1 && !walkway_validate(&s_led.walkway.config)) {
+        char radar_kind[16] = "ld2450";
+        settings_get_radar_kind(radar_kind, sizeof radar_kind);
+        if (!strcmp(radar_kind, "ld2450")) {
+            s_led.walkway_active = true;
+            s_led.count = s_led.walkway.config.chain_count;
+        } else ESP_LOGE(TAG, "Walkway requires LD2450; using legacy mode");
+    }
+
+    if (s_led.walkway_active) s_led.count = s_led.walkway.config.chain_count;
 
     b = 80;                  settings_get_u8("led", "br", &b);
     s_led.brightness = b;
@@ -341,9 +383,13 @@ static void load_settings_from_nvs(void) {
     v = 300; settings_get_u32("dist", "max", &v); s_led.max_cm = v;
 }
 
+bool led_engine_walkway_active(void) { return s_led.walkway_active; }
+bool led_engine_walkway_restart_pending(void) { return s_led.walkway_restart_pending; }
+void led_engine_walkway_saved(void) { s_led.walkway_restart_pending = true; }
+
 void led_engine_reload(void) {
     uint16_t prev_count = s_led.count;
-    load_settings_from_nvs();
+    load_settings_from_nvs(false);
     if (s_led.count != prev_count) {
         ESP_LOGI(TAG, "LED count changed %u → %u; reallocating buffers", prev_count, s_led.count);
         if (s_led.fire_heat) { free(s_led.fire_heat); s_led.fire_heat = NULL; }
@@ -366,7 +412,7 @@ void led_engine_reload(void) {
 
 esp_err_t led_engine_init(uint8_t data_gpio) {
     s_led.data_gpio = data_gpio;
-    load_settings_from_nvs();
+    load_settings_from_nvs(true);
 
     s_led.fire_heat  = calloc(s_led.count, 1);
     s_led.prev_frame = calloc(s_led.count, sizeof(rgb_t));
@@ -398,3 +444,19 @@ esp_err_t led_engine_init(uint8_t data_gpio) {
     xTaskCreate(render_task, "led_render", 6144, NULL, 4, NULL);
     return ESP_OK;
 }
+
+#ifdef AMBISENSE_HOST_REPLAY
+void replay_led_reset(void) {
+    free(s_led.fire_heat); free(s_led.prev_frame);
+    memset(&s_led, 0, sizeof(s_led));
+    load_settings_from_nvs(true);
+    s_led.fire_heat = calloc(s_led.count, 1);
+    s_led.prev_frame = calloc(s_led.count, sizeof(rgb_t));
+}
+void replay_led_render(void) {
+    uint8_t enabled = 1;
+    settings_get_u8("sys", "enabled", &enabled);
+    if (enabled) render_frame();
+    else clear_all();
+}
+#endif

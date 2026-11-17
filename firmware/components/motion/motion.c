@@ -153,6 +153,38 @@ static void run_kalman(float filtered_raw, uint8_t energy, float dt, target_t *t
     t->direction = kalman_direction(&s_m.kf, vel, 10.f);
 }
 
+static target_t motion_process(const radar_frame_t *f) {
+    int raw = f->distance_cm;
+    if (raw < s_m.min_cm) raw = s_m.min_cm;
+    if (raw > s_m.max_cm) raw = s_m.max_cm;
+
+    /* Outlier rejection (median over W=1/3/7 most recent samples).
+     * W=1 effectively bypasses median for users who want it off. */
+    s_m.med_buf[s_m.med_idx] = (int16_t)raw;
+    s_m.med_idx = (s_m.med_idx + 1) % MEDIAN_MAX_W;
+    if (s_m.med_filled < MEDIAN_MAX_W) s_m.med_filled++;
+    uint8_t W = outlier_window(s_m.outlier_strength);
+    int16_t filtered_raw = median_w(s_m.med_buf, s_m.med_idx, s_m.med_filled, W);
+
+    target_t t = { .present = f->present, .energy = f->energy,
+                   .direction = f->direction, .ts_us = f->ts_us };
+    t.raw_cm = filtered_raw;
+
+    if (!s_m.enabled) {
+        t.distance_cm = filtered_raw;
+    } else {
+        uint64_t now = f->ts_us;
+        float dt = s_m.last_us ? (float)(now - s_m.last_us) / 1e6f : 0.02f;
+        s_m.last_us = now;
+        dt = clamp(dt, 0.001f, 1.0f);
+
+        if (s_m.mode == MODE_KALMAN) run_kalman((float)filtered_raw, f->energy, dt, &t);
+        else                          run_pi   ((float)filtered_raw, dt, &t);
+    }
+
+    return t;
+}
+
 static void motion_task(void *arg) {
     (void)arg;
     radar_frame_t f;
@@ -164,33 +196,7 @@ static void motion_task(void *arg) {
             continue;
         }
 
-        int raw = f.distance_cm;
-        if (raw < s_m.min_cm) raw = s_m.min_cm;
-        if (raw > s_m.max_cm) raw = s_m.max_cm;
-
-        /* Outlier rejection (median over W=1/3/7 most recent samples).
-         * W=1 effectively bypasses median for users who want it off. */
-        s_m.med_buf[s_m.med_idx] = (int16_t)raw;
-        s_m.med_idx = (s_m.med_idx + 1) % MEDIAN_MAX_W;
-        if (s_m.med_filled < MEDIAN_MAX_W) s_m.med_filled++;
-        uint8_t W = outlier_window(s_m.outlier_strength);
-        int16_t filtered_raw = median_w(s_m.med_buf, s_m.med_idx, s_m.med_filled, W);
-
-        target_t t = { .present = f.present, .energy = f.energy,
-                       .direction = f.direction, .ts_us = f.ts_us };
-        t.raw_cm = filtered_raw;
-
-        if (!s_m.enabled) {
-            t.distance_cm = filtered_raw;
-        } else {
-            uint64_t now = f.ts_us;
-            float dt = s_m.last_us ? (float)(now - s_m.last_us) / 1e6f : 0.02f;
-            s_m.last_us = now;
-            dt = clamp(dt, 0.001f, 1.0f);
-
-            if (s_m.mode == MODE_KALMAN) run_kalman((float)filtered_raw, f.energy, dt, &t);
-            else                          run_pi   ((float)filtered_raw, dt, &t);
-        }
+        target_t t = motion_process(&f);
 
         xSemaphoreTake(s_m.lock, portMAX_DELAY);
         s_m.latest = t;
@@ -266,3 +272,8 @@ void motion_reload(void) {
     s_m.smoothed = 0; s_m.predicted = 0; s_m.velocity = 0; s_m.err_integral = 0;
     ESP_LOGI(TAG, "Motion config reloaded");
 }
+
+#ifdef AMBISENSE_HOST_REPLAY
+void replay_motion_reset(void) { memset(&s_m, 0, sizeof(s_m)); load_config(); }
+void replay_motion_input(const radar_frame_t *frame) { s_m.latest = motion_process(frame); }
+#endif
