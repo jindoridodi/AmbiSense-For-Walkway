@@ -13,6 +13,8 @@ test: ambisense-replay ../tests/replay_integration.c $(SOURCES)
 	$(CC) $(CPPFLAGS) $(CFLAGS) ../tests/replay_integration.c $(SOURCES) $(LDLIBS) -o /tmp/ambisense-replay-test
 	/tmp/ambisense-replay-test
 	python3 ../tests/replay_cli.py
+	$(CC) -std=c11 -Wall -Wextra -Werror -I../tests/stubs -I../firmware/components/radar/include -I../firmware/components/walkway/include ../tests/walkway_straight.c ../firmware/components/radar/radar_ld2450.c ../firmware/components/walkway/walkway.c -lm -o /tmp/ambisense-walkway-test
+	/tmp/ambisense-walkway-test
 	$(CC) -std=c11 -Wall -Wextra -Werror -I../tests/stubs -I../firmware/components/radar/include ../tests/ld2450_replay.c ../firmware/components/radar/radar_ld2450.c -o /tmp/ambisense-ld2450-test
 	/tmp/ambisense-ld2450-test
 clean:
